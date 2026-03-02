@@ -70,7 +70,32 @@
 
       <!-- 自定义标题容器 - 替代 v-app-bar-title -->
       <div class="header-title">
-        <div :class="$vuetify.display.mobile ? 'text-body-2' : 'text-h6'" class="font-weight-bold d-flex align-center">
+        <!-- 手机端：下拉菜单（仅 xs 断点，< 600px） -->
+        <v-menu v-if="$vuetify.display.xs">
+          <template #activator="{ props: menuProps }">
+            <v-btn
+              v-bind="menuProps"
+              variant="text"
+              class="mobile-tab-selector text-body-2 font-weight-bold"
+              append-icon="mdi-chevron-down"
+            >
+              {{ apiTabOptions.find(t => t.value === channelStore.activeTab)?.label }}
+            </v-btn>
+          </template>
+          <v-list density="compact" nav>
+            <v-list-item
+              v-for="tab in apiTabOptions"
+              :key="tab.value"
+              :active="channelStore.activeTab === tab.value"
+              :to="tab.route"
+            >
+              <v-list-item-title>{{ tab.label }}</v-list-item-title>
+            </v-list-item>
+          </v-list>
+        </v-menu>
+
+        <!-- 桌面端：平铺链接 -->
+        <div v-else class="text-h6 font-weight-bold d-flex align-center">
           <router-link to="/channels/messages" class="api-type-text" :class="{ active: channelStore.activeTab === 'messages' }">
             Claude
           </router-link>
@@ -86,7 +111,7 @@
           <router-link to="/channels/gemini" class="api-type-text" :class="{ active: channelStore.activeTab === 'gemini' }">
             Gemini
           </router-link>
-          <span class="brand-text d-none d-sm-inline">API Proxy - CCX</span>
+          <span class="brand-text d-none d-md-inline">API Proxy - CCX</span>
         </div>
       </div>
 
@@ -255,8 +280,8 @@
           </div>
 
           <div class="action-bar-right">
-            <!-- CCH 计费头移除切换按钮 -->
-            <v-tooltip location="bottom" content-class="fuzzy-tooltip">
+            <!-- CCH 计费头移除切换按钮（仅 Claude Messages 渠道相关） -->
+            <v-tooltip v-if="channelStore.activeTab === 'messages'" location="bottom" content-class="fuzzy-tooltip">
               <template #activator="{ props }">
                 <v-btn
                   v-bind="props"
@@ -400,6 +425,14 @@ const dialogStore = useDialogStore()
 
 // 系统状态 Store
 const systemStore = useSystemStore()
+
+// API 类型 Tab 选项（移动端下拉菜单使用）
+const apiTabOptions = [
+  { value: 'messages', label: 'Claude', route: '/channels/messages' },
+  { value: 'chat', label: 'OpenAI Chat', route: '/channels/chat' },
+  { value: 'responses', label: 'Codex', route: '/channels/responses' },
+  { value: 'gemini', label: 'Gemini', route: '/channels/gemini' },
+] as const
 
 // 对话框状态已迁移到 DialogStore
 
@@ -1576,21 +1609,12 @@ a.api-type-text {
     box-shadow: 2px 2px 0 0 rgba(255, 255, 255, 0.7);
   }
 
-  .api-type-text {
-    padding: 2px 4px;
-  }
-
-  .separator {
-    margin: 0 0;
-  }
-
-  .api-type-text.active {
+  .mobile-tab-selector {
     color: rgb(var(--v-theme-primary)) !important;
-    font-weight: 800 !important;
-  }
-
-  .brand-text {
-    display: none;
+    letter-spacing: 0;
+    text-transform: none;
+    padding: 0 4px !important;
+    min-width: auto !important;
   }
 
   /* --- 统计卡片优化 --- */

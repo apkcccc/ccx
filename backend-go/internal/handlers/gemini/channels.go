@@ -558,6 +558,16 @@ func GetChannelModels(cfgManager *config.ConfigManager) gin.HandlerFunc {
 		log.Printf("[Gemini-Models] 上游响应: channel=%s, key=%s, status=%d, url=%s",
 			channelName, utils.MaskAPIKey(apiKey), resp.StatusCode, url)
 
+		// 401 包装返回，避免前端误判为管理 API 认证失败
+		if resp.StatusCode == 401 {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error":      "上游 API Key 无效",
+				"statusCode": 401,
+				"details":    string(body),
+			})
+			return
+		}
+
 		// 非 200 直接透传
 		if resp.StatusCode != http.StatusOK {
 			c.Data(resp.StatusCode, "application/json", body)

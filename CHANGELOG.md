@@ -1,3 +1,11 @@
+## [Unreleased]
+
+### 修复
+
+- **上游 401 错误误触发重新登录** - `GetChannelModels` 端点透传上游 401 状态码时，前端统一 401 处理逻辑会误判为管理 API 认证失败并清除登录状态。现将上游 401 包装为 400 BadRequest 返回，避免前端误判
+  - 影响文件：`handlers/chat/channels.go`、`handlers/messages/channels.go`、`handlers/responses/channels.go`、`handlers/gemini/channels.go`
+  - 同步更新 `messages/channels_test.go` 中 `TestGetChannelModels_UpstreamReturns401` 断言：期望由 401 改为 400
+
 ## [v2.6.22] - 2026-03-02
 
 ### 新增

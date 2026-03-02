@@ -111,7 +111,7 @@ func TestGetChannelModels_UpstreamReturns200(t *testing.T) {
 	}
 }
 
-// TestGetChannelModels_UpstreamReturns401 上游返回 401 时透传
+// TestGetChannelModels_UpstreamReturns401 上游返回 401 时，包装为 400 避免前端误判为管理 API 认证失败
 func TestGetChannelModels_UpstreamReturns401(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
@@ -128,8 +128,8 @@ func TestGetChannelModels_UpstreamReturns401(t *testing.T) {
 	r := newModelsRouter(cm)
 
 	w := postModels(t, r, "0", GetModelsRequest{Key: "sk-bad"})
-	if w.Code != http.StatusUnauthorized {
-		t.Errorf("期望 401，实际 %d", w.Code)
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("期望 400（上游 401 包装），实际 %d", w.Code)
 	}
 }
 

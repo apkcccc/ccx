@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/BenedictKing/ccx/internal/config"
+	"github.com/BenedictKing/ccx/internal/handlers"
 	"github.com/BenedictKing/ccx/internal/metrics"
 	"github.com/BenedictKing/ccx/internal/scheduler"
 	"github.com/BenedictKing/ccx/internal/session"
@@ -64,9 +65,9 @@ func TestGetDashboard_IncludesStripThoughtSignature(t *testing.T) {
 	sch := scheduler.NewChannelScheduler(cfgManager, messagesMetrics, responsesMetrics, geminiMetrics, chatMetrics, traceAffinity, urlManager)
 
 	r := gin.New()
-	r.GET("/gemini/channels/dashboard", GetDashboard(cfgManager, sch))
+	r.GET("/messages/channels/dashboard", handlers.GetChannelDashboard(cfgManager, sch))
 
-	req := httptest.NewRequest(http.MethodGet, "/gemini/channels/dashboard", nil)
+	req := httptest.NewRequest(http.MethodGet, "/messages/channels/dashboard?type=gemini", nil)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 

@@ -613,14 +613,7 @@ class ApiService {
 
   // 获取渠道仪表盘数据（合并 channels + metrics + stats）
   async getChannelDashboard(type: 'messages' | 'responses' | 'gemini' | 'chat' = 'messages'): Promise<ChannelDashboardResponse> {
-    // Gemini 使用降级实现：组合 getChannels + getMetrics
-    if (type === 'gemini') {
-      return this.getGeminiChannelDashboard()
-    }
-    if (type === 'chat') {
-      return this.getChatChannelDashboard()
-    }
-    const query = type === 'responses' ? '?type=responses' : ''
+    const query = type !== 'messages' ? `?type=${type}` : ''
     return this.request(`/messages/channels/dashboard${query}`)
   }
 
@@ -855,11 +848,6 @@ class ApiService {
     return this.request('/chat/ping')
   }
 
-  // Chat Dashboard（使用后端统一接口）
-  async getChatChannelDashboard(): Promise<ChannelDashboardResponse> {
-    return this.request('/chat/channels/dashboard')
-  }
-
   // ============== Gemini 渠道管理 API ==============
 
   async getGeminiChannels(): Promise<ChannelsResponse> {
@@ -973,11 +961,6 @@ class ApiService {
       latency: ch.latency,
       status: ch.success ? 'healthy' : 'error'
     }))
-  }
-
-  // Gemini Dashboard（使用后端统一接口）
-  async getGeminiChannelDashboard(): Promise<ChannelDashboardResponse> {
-    return this.request('/gemini/channels/dashboard')
   }
 }
 

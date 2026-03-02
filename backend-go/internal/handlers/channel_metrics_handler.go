@@ -570,27 +570,38 @@ func truncateKeyMask(keyMask string, maxLen int) string {
 }
 
 // GetChannelDashboard 获取渠道仪表盘数据（合并 channels + metrics + stats）
-// GET /api/channels/dashboard?type=messages|responses
+// GET /api/channels/dashboard?type=messages|responses|chat|gemini
 // 将原本需要 3 个请求的数据合并为 1 个请求，减少网络开销
 func GetChannelDashboard(cfgManager *config.ConfigManager, sch *scheduler.ChannelScheduler) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		// 获取 type 参数，默认为 messages
-		isResponses := strings.ToLower(c.Query("type")) == "responses"
-		kind := scheduler.ChannelKindMessages
-		if isResponses {
-			kind = scheduler.ChannelKindResponses
+		channelType := strings.ToLower(c.Query("type"))
+		if channelType == "" {
+			channelType = "messages"
 		}
 
 		cfg := cfgManager.GetConfig()
 		var upstreams []config.UpstreamConfig
 		var metricsManager *metrics.MetricsManager
+		var kind scheduler.ChannelKind
 
-		if isResponses {
+		switch channelType {
+		case "responses":
 			upstreams = cfg.ResponsesUpstream
 			metricsManager = sch.GetResponsesMetricsManager()
-		} else {
+			kind = scheduler.ChannelKindResponses
+		case "chat":
+			upstreams = cfg.ChatUpstream
+			metricsManager = sch.GetChatMetricsManager()
+			kind = scheduler.ChannelKindChat
+		case "gemini":
+			upstreams = cfg.GeminiUpstream
+			metricsManager = sch.GetGeminiMetricsManager()
+			kind = scheduler.ChannelKindGemini
+		default: // messages
 			upstreams = cfg.Upstream
 			metricsManager = sch.GetMessagesMetricsManager()
+			kind = scheduler.ChannelKindMessages
 		}
 
 		// 1. 构建 channels 数据
@@ -599,7 +610,7 @@ func GetChannelDashboard(cfgManager *config.ConfigManager, sch *scheduler.Channe
 			status := config.GetChannelStatus(&up)
 			priority := config.GetChannelPriority(&up, i)
 
-			channels[i] = gin.H{
+			channel := gin.H{
 				"index":              i,
 				"name":               up.Name,
 				"serviceType":        up.ServiceType,
@@ -616,6 +627,14 @@ func GetChannelDashboard(cfgManager *config.ConfigManager, sch *scheduler.Channe
 				"promotionUntil":     up.PromotionUntil,
 				"lowQuality":         up.LowQuality,
 			}
+
+			// Gemini 特有字段
+			if channelType == "gemini" {
+				channel["injectDummyThoughtSignature"] = up.InjectDummyThoughtSignature
+				channel["stripThoughtSignature"] = up.StripThoughtSignature
+			}
+
+			channels[i] = channel
 		}
 
 		// 2. 构建 metrics 数据

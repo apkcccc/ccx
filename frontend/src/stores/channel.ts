@@ -164,64 +164,58 @@ export const useChannelStore = defineStore('channel', () => {
 
     const doRefresh = async (tab: ApiTab) => {
       try {
-        // Gemini 使用专用的 dashboard API（降级实现）
-        if (tab === 'gemini') {
-          const dashboard = await api.getGeminiChannelDashboard()
-          geminiChannelsData.value = {
-            channels: mergeChannelsWithLocalData(dashboard.channels, geminiChannelsData.value.channels),
-            current: geminiChannelsData.value.current
-          }
-          // 更新 Gemini tab 的独立缓存
-          dashboardCache.value.gemini = {
-            metrics: dashboard.metrics,
-            stats: dashboard.stats,
-            recentActivity: dashboard.recentActivity
-          }
-          lastRefreshSuccess.value = true
-          return
-        }
-
-        // Chat 使用专用的 dashboard API
-        if (tab === 'chat') {
-          const dashboard = await api.getChatChannelDashboard()
-          chatChannelsData.value = {
-            channels: mergeChannelsWithLocalData(dashboard.channels, chatChannelsData.value.channels),
-            current: chatChannelsData.value.current
-          }
-          dashboardCache.value.chat = {
-            metrics: dashboard.metrics,
-            stats: dashboard.stats,
-            recentActivity: dashboard.recentActivity
-          }
-          lastRefreshSuccess.value = true
-          return
-        }
-
-        // Messages / Responses 使用合并的 dashboard 接口
+        // 统一使用 dashboard 接口
         const dashboard = await api.getChannelDashboard(tab)
 
-        if (tab === 'messages') {
-          channelsData.value = {
-            channels: mergeChannelsWithLocalData(dashboard.channels, channelsData.value.channels),
-            current: channelsData.value.current, // 保留当前选中状态
-          }
-          // 更新 Messages tab 的独立缓存
-          dashboardCache.value.messages = {
-            metrics: dashboard.metrics,
-            stats: dashboard.stats,
-            recentActivity: dashboard.recentActivity
-          }
-        } else {
-          responsesChannelsData.value = {
-            channels: mergeChannelsWithLocalData(dashboard.channels, responsesChannelsData.value.channels),
-            current: responsesChannelsData.value.current, // 保留当前选中状态
-          }
-          // 更新 Responses tab 的独立缓存
-          dashboardCache.value.responses = {
-            metrics: dashboard.metrics,
-            stats: dashboard.stats,
-            recentActivity: dashboard.recentActivity
-          }
+        // 根据 tab 更新对应的数据和缓存
+        switch (tab) {
+          case 'gemini':
+            geminiChannelsData.value = {
+              channels: mergeChannelsWithLocalData(dashboard.channels, geminiChannelsData.value.channels),
+              current: geminiChannelsData.value.current
+            }
+            dashboardCache.value.gemini = {
+              metrics: dashboard.metrics,
+              stats: dashboard.stats,
+              recentActivity: dashboard.recentActivity
+            }
+            break
+
+          case 'chat':
+            chatChannelsData.value = {
+              channels: mergeChannelsWithLocalData(dashboard.channels, chatChannelsData.value.channels),
+              current: chatChannelsData.value.current
+            }
+            dashboardCache.value.chat = {
+              metrics: dashboard.metrics,
+              stats: dashboard.stats,
+              recentActivity: dashboard.recentActivity
+            }
+            break
+
+          case 'messages':
+            channelsData.value = {
+              channels: mergeChannelsWithLocalData(dashboard.channels, channelsData.value.channels),
+              current: channelsData.value.current
+            }
+            dashboardCache.value.messages = {
+              metrics: dashboard.metrics,
+              stats: dashboard.stats,
+              recentActivity: dashboard.recentActivity
+            }
+            break
+
+          case 'responses':
+            responsesChannelsData.value = {
+              channels: mergeChannelsWithLocalData(dashboard.channels, responsesChannelsData.value.channels),
+              current: responsesChannelsData.value.current
+            }
+            dashboardCache.value.responses = {
+              metrics: dashboard.metrics,
+              stats: dashboard.stats,
+              recentActivity: dashboard.recentActivity
+            }
+            break
         }
 
         lastRefreshSuccess.value = true

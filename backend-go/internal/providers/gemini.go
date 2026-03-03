@@ -369,6 +369,8 @@ func (p *GeminiProvider) HandleStreamResponse(body io.ReadCloser) (<-chan string
 		toolUseBlockIndex := 0
 		messageStartSent := false
 		stopReason := ""
+		latestInputTokens := 0
+		latestOutputTokens := 0
 
 		// 文本块状态跟踪
 		textBlockStarted := false
@@ -391,6 +393,38 @@ func (p *GeminiProvider) HandleStreamResponse(body io.ReadCloser) (<-chan string
 			var chunk map[string]interface{}
 			if err := json.Unmarshal([]byte(jsonStr), &chunk); err != nil {
 				continue
+			}
+
+			// Gemini 可能在无 candidates 的 chunk 中返回 usageMetadata（通常出现在流末尾）
+			// 这里必须先提取 usage，避免被后续 candidates 判断提前跳过。
+			if usageMetadata, ok := chunk["usageMetadata"].(map[string]interface{}); ok {
+				inputTokens := latestInputTokens
+				outputTokens := latestOutputTokens
+
+				if promptTokens, ok := usageMetadata["promptTokenCount"].(float64); ok {
+					inputTokens = int(promptTokens)
+				}
+				if cachedTokens, ok := usageMetadata["cachedContentTokenCount"].(float64); ok {
+					inputTokens -= int(cachedTokens)
+				}
+				if candidatesTokens, ok := usageMetadata["candidatesTokenCount"].(float64); ok {
+					outputTokens = int(candidatesTokens)
+				}
+
+				if inputTokens < 0 {
+					inputTokens = 0
+				}
+				if outputTokens < 0 {
+					outputTokens = 0
+				}
+
+				// usageMetadata 可能多次出现，保留最新的非下降值，避免回退。
+				if inputTokens > latestInputTokens {
+					latestInputTokens = inputTokens
+				}
+				if outputTokens > latestOutputTokens {
+					latestOutputTokens = outputTokens
+				}
 			}
 
 			candidates, ok := chunk["candidates"].([]interface{})
@@ -498,10 +532,9 @@ func (p *GeminiProvider) HandleStreamResponse(body io.ReadCloser) (<-chan string
 					textBlockStarted = false
 				}
 
-				if strings.Contains(strings.ToLower(finishReason), "stop") {
-					stopReason = "end_turn"
-				} else if strings.Contains(strings.ToLower(finishReason), "max_tokens") || strings.Contains(strings.ToLower(finishReason), "length") {
-					stopReason = "max_tokens"
+				mappedStopReason := mapGeminiFinishReasonToClaudeStopReason(finishReason)
+				if mappedStopReason != "" {
+					stopReason = mappedStopReason
 				}
 			}
 		}
@@ -532,6 +565,10 @@ func (p *GeminiProvider) HandleStreamResponse(body io.ReadCloser) (<-chan string
 				"delta": map[string]string{
 					"stop_reason": stopReason,
 				},
+				"usage": map[string]int{
+					"input_tokens":  latestInputTokens,
+					"output_tokens": latestOutputTokens,
+				},
 			}
 			deltaJSON, _ := json.Marshal(deltaEvent)
 			eventChan <- fmt.Sprintf("event: message_delta\ndata: %s\n\n", deltaJSON)
@@ -545,4 +582,20 @@ func (p *GeminiProvider) HandleStreamResponse(body io.ReadCloser) (<-chan string
 	}()
 
 	return eventChan, errChan, nil
+}
+
+func mapGeminiFinishReasonToClaudeStopReason(finishReason string) string {
+	reason := strings.ToLower(finishReason)
+
+	switch {
+	case strings.Contains(reason, "max_tokens"), strings.Contains(reason, "length"):
+		return "max_tokens"
+	case strings.Contains(reason, "stop"),
+		strings.Contains(reason, "safety"),
+		strings.Contains(reason, "recitation"),
+		strings.Contains(reason, "other"):
+		return "end_turn"
+	default:
+		return ""
+	}
 }

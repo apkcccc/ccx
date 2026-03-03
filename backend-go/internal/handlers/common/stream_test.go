@@ -2,10 +2,14 @@ package common
 
 import (
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"github.com/BenedictKing/ccx/internal/config"
 	"github.com/BenedictKing/ccx/internal/utils"
+	"github.com/gin-gonic/gin"
 )
 
 func TestPatchUsageFieldsWithLog_NilInputTokens(t *testing.T) {
@@ -444,5 +448,88 @@ func TestHasNonTextContentBlock(t *testing.T) {
 				t.Errorf("hasNonTextContentBlock() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestEnsureMessageDeltaUsage(t *testing.T) {
+	extractUsage := func(t *testing.T, event string) (int, int) {
+		t.Helper()
+		for _, line := range strings.Split(event, "\n") {
+			if !strings.HasPrefix(line, "data: ") {
+				continue
+			}
+
+			var data map[string]interface{}
+			if err := json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &data); err != nil {
+				t.Fatalf("failed to unmarshal event data: %v", err)
+			}
+			if data["type"] != "message_delta" {
+				continue
+			}
+
+			usage, ok := data["usage"].(map[string]interface{})
+			if !ok {
+				t.Fatalf("usage field missing in message_delta")
+			}
+
+			inputTokens, _ := usage["input_tokens"].(float64)
+			outputTokens, _ := usage["output_tokens"].(float64)
+			return int(inputTokens), int(outputTokens)
+		}
+
+		t.Fatalf("message_delta event not found")
+		return 0, 0
+	}
+
+	t.Run("add usage when missing", func(t *testing.T) {
+		event := "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n"
+		patched := EnsureMessageDeltaUsage(event, 123, 7)
+
+		in, out := extractUsage(t, patched)
+		if in != 123 || out != 7 {
+			t.Fatalf("expected usage input=123 output=7, got input=%d output=%d", in, out)
+		}
+	})
+
+	t.Run("keep existing usage", func(t *testing.T) {
+		event := "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"input_tokens\":10,\"output_tokens\":2}}\n\n"
+		patched := EnsureMessageDeltaUsage(event, 999, 888)
+
+		in, out := extractUsage(t, patched)
+		if in != 10 || out != 2 {
+			t.Fatalf("expected existing usage to be kept, got input=%d output=%d", in, out)
+		}
+	})
+}
+
+func TestProcessStreamEvent_MessageStopInjectsUsageWhenMessageDeltaMissing(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{}`))
+
+	flusher, ok := c.Writer.(http.Flusher)
+	if !ok {
+		t.Fatalf("response writer does not implement http.Flusher")
+	}
+
+	ctx := &StreamContext{
+		ContentBlockTypes: make(map[int]string),
+		HasUsage:          true, // message_start 已经有 usage
+	}
+	envCfg := &config.EnvConfig{LogLevel: "info"}
+
+	messageStopEvent := "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+	ProcessStreamEvent(c, c.Writer, flusher, messageStopEvent, ctx, envCfg, []byte(`{"messages":[{"role":"user","content":"hello"}]}`))
+
+	body := w.Body.String()
+	if !strings.Contains(body, "event: message_delta") {
+		t.Fatalf("expected injected message_delta usage event before message_stop, body=%s", body)
+	}
+	if !strings.Contains(body, "\"usage\"") {
+		t.Fatalf("expected injected usage field, body=%s", body)
+	}
+	if !strings.Contains(body, "event: message_stop") {
+		t.Fatalf("expected message_stop event to be forwarded, body=%s", body)
 	}
 }

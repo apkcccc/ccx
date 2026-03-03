@@ -165,13 +165,14 @@ func drainChannels(eventChan <-chan string, errChan <-chan error) {
 
 // StreamContext 流处理上下文
 type StreamContext struct {
-	LogBuffer        bytes.Buffer
-	OutputTextBuffer bytes.Buffer
-	Synthesizer      *utils.StreamSynthesizer
-	LoggingEnabled   bool
-	ClientGone       bool
-	HasUsage         bool
-	NeedTokenPatch   bool
+	LogBuffer            bytes.Buffer
+	OutputTextBuffer     bytes.Buffer
+	Synthesizer          *utils.StreamSynthesizer
+	LoggingEnabled       bool
+	ClientGone           bool
+	HasUsage             bool
+	HasMessageDeltaUsage bool
+	NeedTokenPatch       bool
 	// 累积的 token 统计
 	CollectedUsage CollectedUsageData
 	// 用于日志的"续写前缀"（不参与真实转发，只影响 Stream-Synth 输出可读性）
@@ -361,6 +362,10 @@ func ProcessStreamEvent(
 		}
 		// 累积收集 usage 数据
 		updateCollectedUsage(&ctx.CollectedUsage, usageData)
+
+		if IsMessageDeltaEvent(event) {
+			ctx.HasMessageDeltaUsage = true
+		}
 	}
 
 	// 日志缓存
@@ -373,15 +378,16 @@ func ProcessStreamEvent(
 		}
 	}
 
-	// 在 message_stop 前注入 usage（上游完全没有 usage 的情况）
-	if !ctx.HasUsage && !ctx.ClientGone && IsMessageStopEvent(event) {
+	// 在 message_stop 前注入 usage（message_delta 未携带 usage 的兜底场景）
+	if !ctx.HasMessageDeltaUsage && !ctx.ClientGone && IsMessageStopEvent(event) {
 		usageEvent := BuildUsageEvent(requestBody, ctx.OutputTextBuffer.String())
 		if envCfg.EnableResponseLogs && envCfg.ShouldLog("debug") {
-			log.Printf("[Messages-Stream-Token] 上游无usage, 注入本地估算事件")
+			log.Printf("[Messages-Stream-Token] message_delta 缺少 usage, 在 message_stop 前注入兜底 usage 事件")
 		}
 		w.Write([]byte(usageEvent))
 		flusher.Flush()
 		ctx.HasUsage = true
+		ctx.HasMessageDeltaUsage = true
 	}
 
 	// 修补 token
@@ -398,6 +404,37 @@ func ProcessStreamEvent(
 		eventToSend = PatchMessageStartInputTokensIfNeeded(eventToSend, requestBody, needInputPatch, originalUsageData, envCfg.EnableResponseLogs && envCfg.ShouldLog("debug"), ctx.LowQuality)
 	}
 
+	// 对严格客户端做协议兜底：任何 message_delta 都应带顶层 usage。
+	if IsMessageDeltaEvent(eventToSend) && !HasEventWithUsage(eventToSend) {
+		inputTokens := ctx.CollectedUsage.InputTokens
+		outputTokens := ctx.CollectedUsage.OutputTokens
+
+		estimatedInputTokens := utils.EstimateRequestTokens(requestBody)
+		estimatedOutputTokens := utils.EstimateTokens(ctx.OutputTextBuffer.String())
+
+		if inputTokens <= 0 && estimatedInputTokens > 0 {
+			inputTokens = estimatedInputTokens
+		}
+		if outputTokens <= 0 && estimatedOutputTokens > 0 {
+			outputTokens = estimatedOutputTokens
+		}
+
+		eventToSend = EnsureMessageDeltaUsage(eventToSend, inputTokens, outputTokens)
+
+		if inputTokens > ctx.CollectedUsage.InputTokens {
+			ctx.CollectedUsage.InputTokens = inputTokens
+		}
+		if outputTokens > ctx.CollectedUsage.OutputTokens {
+			ctx.CollectedUsage.OutputTokens = outputTokens
+		}
+
+		ctx.HasUsage = true
+		ctx.HasMessageDeltaUsage = true
+		if envCfg.EnableResponseLogs && envCfg.ShouldLog("debug") {
+			log.Printf("[Messages-Stream-Token] message_delta 缺少 usage, 已就地补齐 input=%d output=%d", inputTokens, outputTokens)
+		}
+	}
+
 	// 记录 message_start 中的 input_tokens（用于后续推断隐式缓存）
 	// 注意：必须在 PatchMessageStartInputTokensIfNeeded 之后执行，因为原始值可能是 0 被修补成估算值
 	if IsMessageStartEvent(event) && ctx.MessageStartInputTokens == 0 {
@@ -406,8 +443,8 @@ func ProcessStreamEvent(
 		}
 	}
 
-	if ctx.NeedTokenPatch && HasEventWithUsage(event) {
-		if IsMessageDeltaEvent(event) || IsMessageStopEvent(event) {
+	if ctx.NeedTokenPatch && HasEventWithUsage(eventToSend) {
+		if IsMessageDeltaEvent(eventToSend) || IsMessageStopEvent(eventToSend) {
 			hasCacheTokens := ctx.CollectedUsage.CacheCreationInputTokens > 0 ||
 				ctx.CollectedUsage.CacheReadInputTokens > 0 ||
 				ctx.CollectedUsage.CacheCreation5mInputTokens > 0 ||
@@ -452,6 +489,11 @@ func ProcessStreamEvent(
 		}
 	}
 
+	if IsMessageDeltaEvent(eventToSend) && HasEventWithUsage(eventToSend) {
+		ctx.HasUsage = true
+		ctx.HasMessageDeltaUsage = true
+	}
+
 	// 转发给客户端
 	if !ctx.ClientGone {
 		if _, err := w.Write([]byte(eventToSend)); err != nil {
@@ -465,6 +507,57 @@ func ProcessStreamEvent(
 			flusher.Flush()
 		}
 	}
+}
+
+// EnsureMessageDeltaUsage 确保 message_delta 事件包含顶层 usage 字段。
+func EnsureMessageDeltaUsage(event string, inputTokens, outputTokens int) string {
+	if inputTokens < 0 {
+		inputTokens = 0
+	}
+	if outputTokens < 0 {
+		outputTokens = 0
+	}
+
+	var result strings.Builder
+	lines := strings.Split(event, "\n")
+
+	for _, line := range lines {
+		if !strings.HasPrefix(line, "data: ") {
+			result.WriteString(line)
+			result.WriteString("\n")
+			continue
+		}
+
+		jsonStr := strings.TrimPrefix(line, "data: ")
+		var data map[string]interface{}
+		if err := json.Unmarshal([]byte(jsonStr), &data); err != nil {
+			result.WriteString(line)
+			result.WriteString("\n")
+			continue
+		}
+
+		if data["type"] == "message_delta" {
+			if _, exists := data["usage"].(map[string]interface{}); !exists {
+				data["usage"] = map[string]int{
+					"input_tokens":  inputTokens,
+					"output_tokens": outputTokens,
+				}
+			}
+		}
+
+		patchedJSON, err := json.Marshal(data)
+		if err != nil {
+			result.WriteString(line)
+			result.WriteString("\n")
+			continue
+		}
+
+		result.WriteString("data: ")
+		result.Write(patchedJSON)
+		result.WriteString("\n")
+	}
+
+	return result.String()
 }
 
 // updateCollectedUsage 更新收集的 usage 数据

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -18,6 +19,77 @@ import (
 	"github.com/BenedictKing/ccx/internal/utils"
 	"github.com/gin-gonic/gin"
 )
+
+// ============== 缓存定义 ==============
+
+const (
+	capabilityCacheTTL    = 5 * time.Minute  // 缓存 TTL（每次命中续期）
+	capabilityCacheMaxTTL = 15 * time.Minute // 缓存最大生存时间（从首次创建算起）
+)
+
+// capabilityCacheEntry 缓存条目
+type capabilityCacheEntry struct {
+	response  CapabilityTestResponse
+	createdAt time.Time // 首次创建时间（用于计算最大生存期）
+	expiresAt time.Time // 过期时间（每次命中续期）
+}
+
+// capabilityCache 全局能力测试缓存
+var capabilityCache = struct {
+	sync.RWMutex
+	entries map[string]*capabilityCacheEntry
+}{
+	entries: make(map[string]*capabilityCacheEntry),
+}
+
+// buildCapabilityCacheKey 构建缓存 key（包含渠道名称，防止索引重排后命中旧缓存）
+func buildCapabilityCacheKey(channelKind string, channelID int, channelName string, protocols []string) string {
+	sorted := make([]string, len(protocols))
+	copy(sorted, protocols)
+	sort.Strings(sorted)
+	return fmt.Sprintf("%s:%d:%s:%s", channelKind, channelID, channelName, strings.Join(sorted, ","))
+}
+
+// getCapabilityCache 读取缓存，命中时自动续期（不超过最大生存期）
+// 全程持有写锁以避免并发读写 expiresAt 的竞态
+func getCapabilityCache(key string) (*CapabilityTestResponse, bool) {
+	capabilityCache.Lock()
+	defer capabilityCache.Unlock()
+
+	entry, ok := capabilityCache.entries[key]
+	if !ok {
+		return nil, false
+	}
+
+	now := time.Now()
+	if now.After(entry.expiresAt) {
+		// 已过期，删除
+		delete(capabilityCache.entries, key)
+		return nil, false
+	}
+
+	// 命中，续期（不超过最大生存期）
+	newExpiry := now.Add(capabilityCacheTTL)
+	maxExpiry := entry.createdAt.Add(capabilityCacheMaxTTL)
+	if newExpiry.After(maxExpiry) {
+		newExpiry = maxExpiry
+	}
+	entry.expiresAt = newExpiry
+
+	return &entry.response, true
+}
+
+// setCapabilityCache 写入缓存
+func setCapabilityCache(key string, resp CapabilityTestResponse) {
+	now := time.Now()
+	capabilityCache.Lock()
+	capabilityCache.entries[key] = &capabilityCacheEntry{
+		response:  resp,
+		createdAt: now,
+		expiresAt: now.Add(capabilityCacheTTL),
+	}
+	capabilityCache.Unlock()
+}
 
 // ============== 类型定义 ==============
 
@@ -107,8 +179,8 @@ func TestChannelCapability(cfgManager *config.ConfigManager, channelKind string)
 			return
 		}
 
-		// 默认超时 15 秒
-		timeout := 15 * time.Second
+		// 默认超时 10 秒
+		timeout := 10 * time.Second
 		if req.Timeout > 0 {
 			timeout = time.Duration(req.Timeout) * time.Millisecond
 		}
@@ -117,6 +189,14 @@ func TestChannelCapability(cfgManager *config.ConfigManager, channelKind string)
 		protocols := req.TargetProtocols
 		if len(protocols) == 0 {
 			protocols = []string{"messages", "chat", "gemini", "responses"}
+		}
+
+		// 检查缓存
+		cacheKey := buildCapabilityCacheKey(channelKind, id, channel.Name, protocols)
+		if cached, ok := getCapabilityCache(cacheKey); ok {
+			log.Printf("[CapabilityTest] 渠道 %s (ID:%d) 命中缓存，返回缓存结果", channel.Name, id)
+			c.JSON(http.StatusOK, *cached)
+			return
 		}
 
 		log.Printf("[CapabilityTest] 开始测试渠道 %s (ID:%d, 类型:%s) 的协议兼容性: %v", channel.Name, id, channel.ServiceType, protocols)
@@ -136,14 +216,21 @@ func TestChannelCapability(cfgManager *config.ConfigManager, channelKind string)
 
 		log.Printf("[CapabilityTest] 渠道 %s 测试完成，兼容协议: %v，耗时: %dms", channel.Name, compatible, totalDuration)
 
-		c.JSON(http.StatusOK, CapabilityTestResponse{
+		resp := CapabilityTestResponse{
 			ChannelID:           id,
 			ChannelName:         channel.Name,
 			SourceType:          channel.ServiceType,
 			Tests:               results,
 			CompatibleProtocols: compatible,
 			TotalDuration:       totalDuration,
-		})
+		}
+
+		// 只缓存有成功结果的测试（避免因超时等临时原因缓存错误的失败结果）
+		if len(compatible) > 0 {
+			setCapabilityCache(cacheKey, resp)
+		}
+
+		c.JSON(http.StatusOK, resp)
 	}
 }
 
@@ -304,6 +391,9 @@ func buildTestRequestWithModel(protocol string, channel *config.UpstreamConfig, 
 			"messages":   []map[string]string{{"role": "user", "content": "What are you best at: code generation, creative writing, or math problem solving?"}},
 			"max_tokens": 20,
 			"stream":     true,
+			"thinking": map[string]interface{}{
+				"type": "disabled",
+			},
 		})
 
 	case "chat":
@@ -318,8 +408,9 @@ func buildTestRequestWithModel(protocol string, channel *config.UpstreamConfig, 
 				{"role": "system", "content": "You are a helpful assistant."},
 				{"role": "user", "content": "What are you best at: code generation, creative writing, or math problem solving?"},
 			},
-			"max_tokens": 20,
-			"stream":     true,
+			"max_tokens":       20,
+			"stream":           true,
+			"reasoning_effort": "none",
 		})
 
 	case "gemini":
@@ -340,6 +431,9 @@ func buildTestRequestWithModel(protocol string, channel *config.UpstreamConfig, 
 			},
 			"generationConfig": map[string]interface{}{
 				"maxOutputTokens": 20,
+				"thinkingConfig": map[string]interface{}{
+					"thinkingLevel": "low",
+				},
 			},
 		})
 		isGemini = true
@@ -351,11 +445,14 @@ func buildTestRequestWithModel(protocol string, channel *config.UpstreamConfig, 
 			requestURL = baseURL + "/v1/responses"
 		}
 		body, err = json.Marshal(map[string]interface{}{
-			"model":        model,
-			"input":        "What are you best at: code generation, creative writing, or math problem solving?",
-			"instructions": "You are Codex, a coding agent based on GPT-5.",
-			"max_tokens":   20,
-			"stream":       true,
+			"model":             model,
+			"input":             "What are you best at: code generation, creative writing, or math problem solving?",
+			"instructions":      "You are Codex, a coding agent based on GPT-5.",
+			"max_output_tokens": 20,
+			"stream":            true,
+			"reasoning": map[string]interface{}{
+				"effort": "low",
+			},
 		})
 
 	default:

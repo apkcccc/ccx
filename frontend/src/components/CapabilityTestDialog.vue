@@ -108,6 +108,7 @@
                   <span v-else class="text-body-2 text-medium-emphasis">-</span>
                 </td>
                 <td>
+                  <!-- 成功 + 非当前 Tab → 复制到此 Tab -->
                   <v-btn
                     v-if="test.success && test.protocol !== currentTab"
                     size="x-small"
@@ -118,9 +119,28 @@
                   >
                     复制到此 Tab
                   </v-btn>
+                  <!-- 成功 + 当前 Tab → 当前 Tab 标记 -->
                   <v-chip v-else-if="test.success && test.protocol === currentTab" size="x-small" color="grey" variant="tonal">
                     当前 Tab
                   </v-chip>
+                  <!-- 失败 + 当前 Tab → 当前 Tab 标记（灰色） -->
+                  <v-chip v-else-if="!test.success && test.protocol === currentTab" size="x-small" color="grey" variant="tonal">
+                    当前 Tab
+                  </v-chip>
+                  <!-- 失败 + 非当前 Tab → 为每个成功协议显示转换按钮 -->
+                  <div v-else-if="!test.success && test.protocol !== currentTab" class="d-flex flex-wrap ga-1">
+                    <v-btn
+                      v-for="successProto in getSuccessfulProtocols()"
+                      :key="successProto"
+                      size="x-small"
+                      :color="getProtocolColor(successProto)"
+                      variant="outlined"
+                      rounded="lg"
+                      @click="$emit('copyToTab', test.protocol)"
+                    >
+                      {{ getProtocolDisplayName(successProto) }} 转换
+                    </v-btn>
+                  </div>
                 </td>
               </tr>
             </tbody>
@@ -174,7 +194,7 @@ const getProtocolColor = (protocol: string) => {
     messages: 'orange',
     chat: 'primary',
     gemini: 'deep-purple',
-    responses: 'warning'
+    responses: 'teal'
   }
   return map[protocol] || 'grey'
 }
@@ -188,6 +208,14 @@ const getProtocolIcon = (protocol: string) => {
     responses: 'mdi-code-braces'
   }
   return map[protocol] || 'mdi-api'
+}
+
+// 获取测试结果中所有成功的协议列表
+const getSuccessfulProtocols = () => {
+  if (!result.value) return []
+  return result.value.tests
+    .filter(t => t.success)
+    .map(t => t.protocol)
 }
 
 // 暴露方法供父组件调用

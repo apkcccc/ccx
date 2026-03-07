@@ -641,8 +641,8 @@ const handleCopyToTab = async (targetProtocol: string) => {
     return
   }
 
-  // 构造渠道配置（去除运行时字段）
-  const channelConfig: Omit<Channel, 'index' | 'latency' | 'status'> = {
+  // 构造渠道配置（仅复制核心连接信息）
+  const channelConfig: Partial<Channel> = {
     name: sourceChannel.name,
     serviceType: sourceChannel.serviceType,
     baseUrl: sourceChannel.baseUrl,
@@ -650,17 +650,7 @@ const handleCopyToTab = async (targetProtocol: string) => {
     apiKeys: [...sourceChannel.apiKeys],
     description: sourceChannel.description,
     website: sourceChannel.website,
-    insecureSkipVerify: sourceChannel.insecureSkipVerify,
-    modelMapping: sourceChannel.modelMapping ? { ...sourceChannel.modelMapping } : undefined,
-    reasoningMapping: sourceChannel.reasoningMapping ? { ...sourceChannel.reasoningMapping } : undefined,
-    customHeaders: sourceChannel.customHeaders ? { ...sourceChannel.customHeaders } : undefined,
     proxyUrl: sourceChannel.proxyUrl,
-    lowQuality: sourceChannel.lowQuality,
-    textVerbosity: sourceChannel.textVerbosity,
-    fastMode: sourceChannel.fastMode,
-    injectDummyThoughtSignature: sourceChannel.injectDummyThoughtSignature,
-    stripThoughtSignature: sourceChannel.stripThoughtSignature,
-    supportedModels: sourceChannel.supportedModels ? [...sourceChannel.supportedModels] : undefined,
   }
 
   try {

@@ -382,7 +382,7 @@ func buildTestRequestWithModel(protocol string, channel *config.UpstreamConfig, 
 				},
 				{
 					"type": "text",
-					"text": "You are Claude Code, Anthropic's official CLI for Claude.",
+					"text": "You are a Claude agent, built on Anthropic's Claude Agent SDK.",
 					"cache_control": map[string]string{
 						"type": "ephemeral",
 					},

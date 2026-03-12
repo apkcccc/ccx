@@ -117,9 +117,9 @@
 
       <v-spacer/>
 
-      <!-- 版本信息 -->
+      <!-- 版本信息（手机端隐藏） -->
       <div
-        v-if="systemStore.versionInfo.currentVersion"
+        v-if="!$vuetify.display.xs && systemStore.versionInfo.currentVersion"
         class="version-badge"
         :class="{
           'version-clickable': systemStore.versionInfo.status === 'update-available' || systemStore.versionInfo.status === 'latest',
@@ -153,8 +153,8 @@
         </template>
       </div>
 
-      <!-- 桌面端语言切换 -->
-      <v-menu v-if="!$vuetify.display.xs" location="bottom end">
+      <!-- 语言切换 -->
+      <v-menu location="bottom end">
         <template #activator="{ props: menuProps }">
           <v-btn
             v-bind="menuProps"
@@ -992,8 +992,8 @@ const handleLogout = () => {
 }
 
 // 处理认证失败
-const handleAuthError = (error: any) => {
-  if (error.message && error.message.includes('认证失败')) {
+const handleAuthError = (error: unknown) => {
+  if (error instanceof ApiError && error.status === 401) {
     authStore.setAuthError(t('toast.authInvalid'))
   } else {
     showToast(t('toast.operationFailed', { message: error instanceof Error ? error.message : t('system.unknown') }), 'error')

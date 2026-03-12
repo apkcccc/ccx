@@ -1,7 +1,7 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
 
-import { resolveInitialLocale } from '@/i18n/core'
+import { getRuntimeLocale } from '@/i18n/core'
 import type { SupportedLocale } from '@/i18n'
 
 /**
@@ -25,8 +25,8 @@ export const usePreferencesStore = defineStore('preferences', () => {
   // 移除计费头开关
   const stripBillingHeader = ref(true)
 
-  // UI 语言
-  const uiLanguage = ref<SupportedLocale>('en')
+  // UI 语言（默认取运行时配置，persistedstate 有值时会自动覆盖）
+  const uiLanguage = ref<SupportedLocale>(getRuntimeLocale())
 
   // 全局统计面板展开状态
   const showGlobalStats = ref(false)
@@ -79,10 +79,12 @@ export const usePreferencesStore = defineStore('preferences', () => {
   }
 
   /**
-   * 初始化 UI 语言，优先使用已持久化值
+   * 初始化 UI 语言
+   * 初始值已通过 getRuntimeLocale() 设置，persistedstate 插件会自动覆盖为已持久化值
+   * 此方法仅用于应用启动时同步 document.lang 等副作用
    */
-  function initializeUILanguage(runtimeLanguage?: string) {
-    uiLanguage.value = resolveInitialLocale(uiLanguage.value, runtimeLanguage)
+  function initializeUILanguage(_runtimeLanguage?: string) {
+    // uiLanguage 此时已是正确值（持久化值 > 运行时默认值），无需额外处理
   }
 
   /**

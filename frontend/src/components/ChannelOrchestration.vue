@@ -1483,7 +1483,7 @@ defineExpose({
 /* Grid content container */
 .channel-row-content {
   display: grid;
-  grid-template-columns: 28px minmax(72px, auto) minmax(0, 1fr) auto 50px 50px 50px auto;
+  grid-template-columns: 28px 28px minmax(72px, auto) minmax(0, 1fr) auto 50px 50px 50px auto;
   align-items: center;
   gap: 6px;
   position: relative;
@@ -1817,7 +1817,7 @@ defineExpose({
 /* Responsive adjustments */
 @media (max-width: 1400px) {
   .channel-row-content {
-    grid-template-columns: 28px minmax(64px, auto) minmax(0, 1fr) auto 45px 45px 45px auto;
+    grid-template-columns: 28px 28px minmax(64px, auto) minmax(0, 1fr) auto 45px 45px 45px auto;
     gap: 5px;
   }
   .channel-row {
@@ -1827,7 +1827,7 @@ defineExpose({
 
 @media (max-width: 1200px) {
   .channel-row-content {
-    grid-template-columns: 26px minmax(60px, auto) minmax(0, 1fr) auto 40px 40px 40px auto;
+    grid-template-columns: 26px 26px minmax(60px, auto) minmax(0, 1fr) auto 40px 40px 40px auto;
     gap: 4px;
   }
   .channel-row {
@@ -1845,7 +1845,7 @@ defineExpose({
 
 @media (max-width: 960px) {
   .channel-row-content {
-    grid-template-columns: 26px minmax(56px, auto) minmax(0, 1fr) auto 38px 38px 38px auto;
+    grid-template-columns: 26px 26px minmax(56px, auto) minmax(0, 1fr) auto 38px 38px 38px auto;
     gap: 4px;
   }
   .channel-row {

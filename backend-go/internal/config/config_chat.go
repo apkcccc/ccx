@@ -185,6 +185,9 @@ func (cm *ConfigManager) UpdateChatUpstream(index int, updates UpstreamUpdate) (
 	if updates.LowQuality != nil {
 		upstream.LowQuality = *updates.LowQuality
 	}
+	if updates.RPM != nil {
+		upstream.RPM = *updates.RPM
+	}
 	if updates.CustomHeaders != nil {
 		upstream.CustomHeaders = updates.CustomHeaders
 	}

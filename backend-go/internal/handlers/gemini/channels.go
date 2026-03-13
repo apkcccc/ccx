@@ -48,6 +48,7 @@ func GetUpstreams(cfgManager *config.ConfigManager) gin.HandlerFunc {
 				"priority":                    priority,
 				"promotionUntil":              up.PromotionUntil,
 				"lowQuality":                  up.LowQuality,
+				"rpm":                         up.RPM,
 				"injectDummyThoughtSignature": up.InjectDummyThoughtSignature,
 				"stripThoughtSignature":       up.StripThoughtSignature,
 				"customHeaders":               up.CustomHeaders,

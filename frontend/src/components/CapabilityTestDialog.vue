@@ -97,10 +97,11 @@
                     location="top"
                     :content-class="getTooltipClass(modelResult)"
                   >
-                    <template #activator="{ props }">
+                    <template #activator="{ props: tooltipProps }">
                       <div
-                        v-bind="props"
-                        :class="['model-result-badge', modelResult.success ? 'success-badge' : modelResult.status === 'failed' ? 'error-badge' : modelResult.status === 'running' ? 'running-badge' : modelResult.status === 'skipped' ? 'skipped-badge' : 'queued-badge']"
+                        v-bind="tooltipProps"
+                        :class="['model-result-badge', modelResult.success ? 'success-badge' : modelResult.status === 'failed' ? 'error-badge' : modelResult.status === 'running' ? 'running-badge' : modelResult.status === 'skipped' ? 'skipped-badge' : 'queued-badge', isModelRetryable(modelResult) ? 'retryable-badge' : '']"
+                        @click="isModelRetryable(modelResult) ? handleRetryModel(test.protocol, modelResult.model) : undefined"
                       >
                         <span class="model-name">{{ modelResult.model }}</span>
                         <v-icon size="16">
@@ -137,6 +138,7 @@
                         <span class="tooltip-value">{{ getModelStatusLabel(modelResult.status) }}</span>
                       </div>
                       <div class="tooltip-error">{{ modelResult.error || t('capability.failedTooltip') }}</div>
+                      <div v-if="isModelRetryable(modelResult)" class="tooltip-retry">{{ t('capability.retryModel') }}</div>
                     </div>
                   </v-tooltip>
                 </div>
@@ -259,10 +261,11 @@
                             location="top"
                             :content-class="getTooltipClass(modelResult)"
                           >
-                            <template #activator="{ props }">
+                            <template #activator="{ props: tooltipProps }">
                               <div
-                                v-bind="props"
-                                :class="['model-result-badge', modelResult.success ? 'success-badge' : modelResult.status === 'failed' ? 'error-badge' : modelResult.status === 'running' ? 'running-badge' : modelResult.status === 'skipped' ? 'skipped-badge' : 'queued-badge']"
+                                v-bind="tooltipProps"
+                                :class="['model-result-badge', modelResult.success ? 'success-badge' : modelResult.status === 'failed' ? 'error-badge' : modelResult.status === 'running' ? 'running-badge' : modelResult.status === 'skipped' ? 'skipped-badge' : 'queued-badge', isModelRetryable(modelResult) ? 'retryable-badge' : '']"
+                                @click="isModelRetryable(modelResult) ? handleRetryModel(test.protocol, modelResult.model) : undefined"
                               >
                                 <span class="model-name">{{ modelResult.model }}</span>
                                 <v-icon size="16">
@@ -299,6 +302,7 @@
                                 <span class="tooltip-value">{{ getModelStatusLabel(modelResult.status) }}</span>
                               </div>
                               <div class="tooltip-error">{{ modelResult.error || t('capability.failedTooltip') }}</div>
+                              <div v-if="isModelRetryable(modelResult)" class="tooltip-retry">{{ t('capability.retryModel') }}</div>
                             </div>
                           </v-tooltip>
                         </div>
@@ -315,6 +319,19 @@
           </div>
         </div>
       </v-card-text>
+
+      <v-card-actions v-if="state === 'running'" class="px-4 pb-4">
+        <v-spacer />
+        <v-btn
+          color="error"
+          variant="tonal"
+          :loading="cancelling"
+          @click="handleCancel"
+        >
+          <v-icon start>mdi-stop-circle</v-icon>
+          {{ cancelling ? t('capability.cancelling') : t('capability.cancel') }}
+        </v-btn>
+      </v-card-actions>
     </v-card>
   </v-dialog>
 </template>
@@ -337,18 +354,22 @@ interface Props {
 }
 
 const props = defineProps<Props>()
-defineEmits<{
+const emit = defineEmits<{
   'update:modelValue': [value: boolean]
   'copyToTab': [protocol: string]
+  'cancel': []
+  'retryModel': [protocol: string, model: string]
 }>()
 
 const { t } = useI18n()
 
 const errorMessage = ref('')
+const cancelling = ref(false)
 
 watch(() => props.modelValue, (open) => {
   if (open) {
     errorMessage.value = ''
+    cancelling.value = false
   }
 })
 
@@ -361,8 +382,15 @@ watch(() => props.capabilityJob?.jobId ?? '', (nextJobId, prevJobId) => {
 const state = computed(() => {
   if (errorMessage.value) return 'error'
   if (!props.capabilityJob) return 'initializing'
-  if (props.capabilityJob.status === 'completed' || props.capabilityJob.status === 'failed') return 'completed'
+  if (props.capabilityJob.status === 'completed' || props.capabilityJob.status === 'failed' || props.capabilityJob.status === 'cancelled') return 'completed'
   return 'running'
+})
+
+// 当状态离开 running 时复位 cancelling（覆盖取消失败、重测恢复等场景）
+watch(state, (newState) => {
+  if (newState !== 'running') {
+    cancelling.value = false
+  }
 })
 
 const job = computed(() => props.capabilityJob)
@@ -471,6 +499,19 @@ const formatTime = (value: string): string => {
 
 const setError = (error: string) => {
   errorMessage.value = error
+}
+
+const handleCancel = () => {
+  cancelling.value = true
+  emit('cancel')
+}
+
+const handleRetryModel = (protocol: string, model: string) => {
+  emit('retryModel', protocol, model)
+}
+
+const isModelRetryable = (modelResult: CapabilityModelJobResult): boolean => {
+  return modelResult.status === 'failed' || modelResult.status === 'skipped'
 }
 
 const isModelPending = (modelResult: CapabilityModelJobResult): boolean => {
@@ -621,6 +662,15 @@ defineExpose({ setError })
   color: #dc2626 !important;
 }
 
+.model-result-badge.retryable-badge {
+  cursor: pointer;
+}
+
+.model-result-badge.retryable-badge:hover {
+  filter: brightness(0.92);
+  box-shadow: 0 2px 12px rgba(15, 23, 42, 0.12);
+}
+
 .model-result-badge:hover {
   transform: translateY(-1px);
   filter: brightness(0.98);
@@ -713,6 +763,14 @@ defineExpose({ setError })
   margin-top: 4px;
   max-width: 300px;
   word-break: break-word;
+}
+
+.tooltip-retry {
+  font-size: 0.75rem;
+  color: inherit;
+  opacity: 0.7;
+  margin-top: 6px;
+  font-style: italic;
 }
 
 @media (max-width: 720px) {

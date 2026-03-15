@@ -98,7 +98,8 @@ func setCapabilityCache(key string, resp CapabilityTestResponse) {
 // CapabilityTestRequest 能力测试请求体
 type CapabilityTestRequest struct {
 	TargetProtocols []string `json:"targetProtocols"`
-	Timeout         int      `json:"timeout"` // 毫秒
+	Timeout         int      `json:"timeout"`       // 毫秒
+	PreviousJobID   string   `json:"previousJobId"` // 可选：上次测试的 jobId，用于复用成功结果
 }
 
 type ModelTestResult struct {
@@ -230,7 +231,38 @@ func TestChannelCapability(cfgManager *config.ConfigManager, channelKind string)
 		}
 		log.Printf("[CapabilityTest-Job] 创建能力测试任务 %s，渠道 %s (ID:%d, 类型:%s)，协议: %v", job.JobID, channel.Name, id, channel.ServiceType, protocols)
 
-		go runCapabilityTestJob(job.JobID, channelKind, id, *channel, protocols, timeout, cacheKey, lookupKey)
+		// 提取上次成功的结果用于复用
+		var previousResults map[string]map[string]ModelTestResult
+		if req.PreviousJobID != "" {
+			if prevJob, ok := capabilityJobs.get(req.PreviousJobID); ok && prevJob.ChannelID == id && prevJob.ChannelKind == channelKind {
+				previousResults = make(map[string]map[string]ModelTestResult)
+				for _, test := range prevJob.Tests {
+					modelMap := make(map[string]ModelTestResult)
+					for _, mr := range test.ModelResults {
+						if mr.Status == CapabilityModelStatusSuccess {
+							modelMap[mr.Model] = ModelTestResult{
+								Model:              mr.Model,
+								Success:            mr.Success,
+								Latency:            mr.Latency,
+								StreamingSupported: mr.StreamingSupported,
+								Error:              mr.Error,
+								StartedAt:          mr.StartedAt,
+								TestedAt:           mr.TestedAt,
+							}
+						}
+					}
+					if len(modelMap) > 0 {
+						previousResults[test.Protocol] = modelMap
+					}
+				}
+				if len(previousResults) > 0 {
+					log.Printf("[CapabilityTest-Job] 复用上次测试 %s 的成功结果，跳过 %d 个协议的成功模型",
+						req.PreviousJobID, len(previousResults))
+				}
+			}
+		}
+
+		go runCapabilityTestJob(job.JobID, channelKind, id, *channel, protocols, timeout, cacheKey, lookupKey, previousResults)
 
 		c.JSON(http.StatusOK, gin.H{"jobId": job.JobID, "resumed": false, "job": job})
 		return
@@ -272,16 +304,41 @@ func buildRoundRobinQueue(protocolModels map[string][]string, protocols []string
 	return queue
 }
 
-func runCapabilityTestJob(jobID, channelKind string, channelID int, channel config.UpstreamConfig, protocols []string, timeout time.Duration, cacheKey, lookupKey string) {
-	capabilityJobs.update(jobID, func(job *CapabilityTestJob) {
+func runCapabilityTestJob(jobID, channelKind string, channelID int, channel config.UpstreamConfig, protocols []string, timeout time.Duration, cacheKey, lookupKey string, previousResults map[string]map[string]ModelTestResult) {
+	// 创建可取消的 context，用于支持前端取消操作
+	ctx, cancel := context.WithCancel(context.Background())
+	capabilityJobs.setCancelFunc(jobID, cancel)
+
+	// 检查是否在 queued 期间已被取消
+	if ctx.Err() != nil {
+		if lookupKey != "" {
+			capabilityJobs.clearLookupKey(lookupKey)
+		}
+		return
+	}
+
+	updatedJob, _ := capabilityJobs.update(jobID, func(job *CapabilityTestJob) {
+		// 仅在未被取消时才设为 running
+		if job.Status == CapabilityJobStatusCancelled {
+			return
+		}
 		job.Status = CapabilityJobStatusRunning
 		job.StartedAt = time.Now().Format(time.RFC3339Nano)
 	})
 
+	// 如果 job 已被取消（在 queued 期间），不再执行测试
+	if updatedJob != nil && updatedJob.Status == CapabilityJobStatusCancelled {
+		log.Printf("[CapabilityTest-Job] 任务 %s 在 queued 期间已被取消，跳过执行", jobID)
+		if lookupKey != "" {
+			capabilityJobs.clearLookupKey(lookupKey)
+		}
+		return
+	}
+
 	log.Printf("[CapabilityTest-Job] 开始执行能力测试任务 %s，渠道 %s (ID:%d, 类型:%s)，协议: %v", jobID, channel.Name, channelID, channel.ServiceType, protocols)
 
 	totalStart := time.Now()
-	results := runRoundRobinTests(context.Background(), &channel, protocols, timeout, jobID)
+	results := runRoundRobinTests(ctx, &channel, protocols, timeout, jobID, previousResults)
 	totalDuration := time.Since(totalStart).Milliseconds()
 
 	compatible := make([]string, 0)
@@ -303,6 +360,10 @@ func runCapabilityTestJob(jobID, channelKind string, channelID int, channel conf
 	// 编排器已在执行过程中通过 capabilityJobs.update 实时维护 job.Tests，
 	// 这里只更新最终元数据，不重建 Tests（避免覆盖编排器维护的 skipped 等中间状态）
 	capabilityJobs.update(jobID, func(job *CapabilityTestJob) {
+		// 如果已被取消，保留 cancelled 状态
+		if job.Status == CapabilityJobStatusCancelled {
+			return
+		}
 		job.ChannelName = channel.Name
 		job.SourceType = channel.ServiceType
 		job.CompatibleProtocols = append([]string(nil), compatible...)
@@ -315,7 +376,8 @@ func runCapabilityTestJob(jobID, channelKind string, channelID int, channel conf
 		}
 	})
 
-	if len(compatible) > 0 {
+	// 仅在未被取消且有兼容协议时写入缓存
+	if len(compatible) > 0 && ctx.Err() == nil {
 		setCapabilityCache(cacheKey, resp)
 		log.Printf("[CapabilityTest-Cache] 渠道 %s (ID:%d) 写入缓存，兼容协议: %v", channel.Name, channelID, compatible)
 	}
@@ -329,7 +391,8 @@ func runCapabilityTestJob(jobID, channelKind string, channelID int, channel conf
 
 // runRoundRobinTests 核心编排器，串行按 round-robin 顺序逐个调度
 // 所有模型都会被测试，不会在首次成功后跳过后续模型
-func runRoundRobinTests(ctx context.Context, channel *config.UpstreamConfig, protocols []string, perModelTimeout time.Duration, jobID string) []ProtocolTestResult {
+// previousResults 可选：上次测试中成功的结果，跳过这些模型
+func runRoundRobinTests(ctx context.Context, channel *config.UpstreamConfig, protocols []string, perModelTimeout time.Duration, jobID string, previousResults map[string]map[string]ModelTestResult) []ProtocolTestResult {
 	// 1. 收集各协议模型列表，初始化 job 状态
 	protocolModels := make(map[string][]string)
 	protocolTimedOut := make(map[string]bool) // true = 全局超时强制终止
@@ -388,8 +451,62 @@ func runRoundRobinTests(ctx context.Context, channel *config.UpstreamConfig, pro
 		log.Printf("[CapabilityTest-Protocol] 开始测试渠道 %s 的 %s 协议兼容性", channel.Name, protocol)
 	}
 
-	// 2. 构建交错队列
-	queue := buildRoundRobinQueue(protocolModels, protocols)
+	// 1.5 预填充上次成功的结果
+	if len(previousResults) > 0 {
+		for protocol, modelMap := range previousResults {
+			models := protocolModels[protocol]
+			if len(models) == 0 {
+				continue
+			}
+			result := results[protocol]
+			if result == nil {
+				continue
+			}
+			for i, modelName := range models {
+				if prevResult, ok := modelMap[modelName]; ok && prevResult.Success {
+					result.ModelResults[i] = prevResult
+					result.SuccessCount++
+					if result.SuccessCount == 1 {
+						result.TestedModel = prevResult.Model
+						result.StreamingSupported = prevResult.StreamingSupported
+					}
+					// 更新 job 中对应模型状态
+					capabilityJobs.update(jobID, func(job *CapabilityTestJob) {
+						updateCapabilityJobModelResult(job, protocol, modelName, CapabilityModelStatusSuccess, prevResult)
+					})
+				}
+			}
+		}
+	}
+
+	// 2. 构建交错队列（排除已有成功结果的模型）
+	// 需要保留原始索引，因为 result.ModelResults 按原始顺序排列
+	filteredProtocolModels := make(map[string][]string)
+	originalIndexMap := make(map[string]map[string]int) // protocol -> model -> original index
+	for protocol, models := range protocolModels {
+		originalIndexMap[protocol] = make(map[string]int)
+		var filtered []string
+		for origIdx, model := range models {
+			if prevModels, ok := previousResults[protocol]; ok {
+				if prevResult, ok := prevModels[model]; ok && prevResult.Success {
+					continue // 跳过已成功的模型
+				}
+			}
+			originalIndexMap[protocol][model] = origIdx
+			filtered = append(filtered, model)
+		}
+		filteredProtocolModels[protocol] = filtered
+	}
+	queue := buildRoundRobinQueue(filteredProtocolModels, protocols)
+
+	// 修正 queue 中的 index 为原始列表中的索引
+	for i := range queue {
+		if idxMap, ok := originalIndexMap[queue[i].protocol]; ok {
+			if origIdx, ok := idxMap[queue[i].model]; ok {
+				queue[i].index = origIdx
+			}
+		}
+	}
 
 	// 3. 计算全局超时
 	// 串行执行中每个模型最多耗时 max(interval, perModelTimeout)，累加所有模型 + 缓冲
@@ -625,13 +742,13 @@ func executeModelTest(ctx context.Context, channel *config.UpstreamConfig, proto
 // testProtocolCompatibility 并发测试多个协议的兼容性（已废弃，保留用于兼容）
 func testProtocolCompatibility(ctx context.Context, channel *config.UpstreamConfig, protocols []string, timeout time.Duration, jobID string) []ProtocolTestResult {
 	// 已废弃，直接调用新实现
-	return runRoundRobinTests(ctx, channel, protocols, timeout, jobID)
+	return runRoundRobinTests(ctx, channel, protocols, timeout, jobID, nil)
 }
 
 // testSingleProtocol 已废弃，保留用于兼容
 func testSingleProtocol(ctx context.Context, channel *config.UpstreamConfig, protocol string, timeout time.Duration, jobID string) ProtocolTestResult {
 	// 已废弃，直接调用新实现
-	results := runRoundRobinTests(ctx, channel, []string{protocol}, timeout, jobID)
+	results := runRoundRobinTests(ctx, channel, []string{protocol}, timeout, jobID, nil)
 	if len(results) > 0 {
 		return results[0]
 	}
@@ -893,6 +1010,210 @@ func sendAndCheckStream(ctx context.Context, client *http.Client, req *http.Requ
 	}
 
 	return true, streamingSupported, resp.StatusCode, nil
+}
+
+// ============== 取消与重测 ==============
+
+// CancelCapabilityTestJob 取消正在进行的能力测试
+func CancelCapabilityTestJob(cfgManager *config.ConfigManager, channelKind string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		id, err := parseCapabilityChannelID(c)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid channel ID"})
+			return
+		}
+
+		jobID := c.Param("jobId")
+		job, ok := capabilityJobs.get(jobID)
+		if !ok {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Capability test job not found"})
+			return
+		}
+
+		if job.ChannelID != id || job.ChannelKind != channelKind {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Capability test job not found"})
+			return
+		}
+
+		// 只能取消正在运行或排队中的 job
+		if job.Status != CapabilityJobStatusRunning && job.Status != CapabilityJobStatusQueued {
+			c.JSON(http.StatusConflict, gin.H{"error": "Job is not running"})
+			return
+		}
+
+		// 调用 CancelFunc 取消 goroutine
+		if cancelFn, ok := capabilityJobs.getCancelFunc(jobID); ok {
+			cancelFn()
+		}
+
+		// 更新 job 状态
+		capabilityJobs.update(jobID, func(job *CapabilityTestJob) {
+			job.Status = CapabilityJobStatusCancelled
+			job.FinishedAt = time.Now().Format(time.RFC3339Nano)
+			// 将所有 queued/running 模型标记为 skipped
+			for i := range job.Tests {
+				for j := range job.Tests[i].ModelResults {
+					if job.Tests[i].ModelResults[j].Status == CapabilityModelStatusQueued ||
+						job.Tests[i].ModelResults[j].Status == CapabilityModelStatusRunning {
+						job.Tests[i].ModelResults[j].Status = CapabilityModelStatusSkipped
+					}
+				}
+				// 更新协议状态
+				if job.Tests[i].Status == CapabilityProtocolStatusQueued || job.Tests[i].Status == CapabilityProtocolStatusRunning {
+					job.Tests[i].Status = CapabilityProtocolStatusFailed
+				}
+			}
+		})
+
+		log.Printf("[CapabilityTest-Cancel] 能力测试任务 %s 已取消", jobID)
+		c.JSON(http.StatusOK, gin.H{"status": "cancelled"})
+	}
+}
+
+// RetryCapabilityTestModel 重测单个模型
+func RetryCapabilityTestModel(cfgManager *config.ConfigManager, channelKind string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		id, err := parseCapabilityChannelID(c)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid channel ID"})
+			return
+		}
+
+		jobID := c.Param("jobId")
+		job, ok := capabilityJobs.get(jobID)
+		if !ok {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Capability test job not found"})
+			return
+		}
+
+		if job.ChannelID != id || job.ChannelKind != channelKind {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Capability test job not found"})
+			return
+		}
+
+		var req struct {
+			Protocol string `json:"protocol"`
+			Model    string `json:"model"`
+		}
+		if err := c.ShouldBindJSON(&req); err != nil || req.Protocol == "" || req.Model == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "protocol and model are required"})
+			return
+		}
+
+		// 检查模型是否存在于 job 中
+		modelFound := false
+		for _, test := range job.Tests {
+			if test.Protocol != req.Protocol {
+				continue
+			}
+			for _, mr := range test.ModelResults {
+				if mr.Model == req.Model {
+					modelFound = true
+					break
+				}
+			}
+		}
+		if !modelFound {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Model not found in job"})
+			return
+		}
+
+		// 获取渠道配置
+		channel, chErr := getCapabilityTestChannel(cfgManager, channelKind, id)
+		if chErr != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": chErr.Error()})
+			return
+		}
+
+		timeout := 10 * time.Second
+		if job.TimeoutMilliseconds > 0 {
+			timeout = time.Duration(job.TimeoutMilliseconds) * time.Millisecond
+		}
+
+		// 将目标模型状态设为 running
+		capabilityJobs.update(jobID, func(j *CapabilityTestJob) {
+			for i := range j.Tests {
+				if j.Tests[i].Protocol != req.Protocol {
+					continue
+				}
+				// 如果协议已完成，重新设为 running
+				if j.Tests[i].Status == CapabilityProtocolStatusCompleted || j.Tests[i].Status == CapabilityProtocolStatusFailed {
+					j.Tests[i].Status = CapabilityProtocolStatusRunning
+				}
+				for k := range j.Tests[i].ModelResults {
+					if j.Tests[i].ModelResults[k].Model == req.Model {
+						j.Tests[i].ModelResults[k].Status = CapabilityModelStatusRunning
+						j.Tests[i].ModelResults[k].Error = nil
+						break
+					}
+				}
+				break
+			}
+			// 如果 job 已经完成/失败/取消，重设为 running
+			if j.Status == CapabilityJobStatusCompleted || j.Status == CapabilityJobStatusFailed || j.Status == CapabilityJobStatusCancelled {
+				j.Status = CapabilityJobStatusRunning
+				j.FinishedAt = ""
+			}
+		})
+
+		// 异步执行单模型测试（使用独立可取消 context）
+		// 不覆盖 job 的 CancelFunc，避免影响主任务的取消能力
+		retryCtx, retryCancel := context.WithCancel(context.Background())
+
+		go func() {
+			defer retryCancel()
+			modelResult := executeModelTest(retryCtx, channel, req.Protocol, req.Model, timeout, jobID)
+
+			// 更新协议和 job 整体状态
+			capabilityJobs.update(jobID, func(j *CapabilityTestJob) {
+				for i := range j.Tests {
+					if j.Tests[i].Protocol != req.Protocol {
+						continue
+					}
+					// 重新统计协议结果
+					allDone := true
+					anySuccess := false
+					successCount := 0
+					var firstSuccessModel string
+					var firstSuccessStreaming bool
+					for _, mr := range j.Tests[i].ModelResults {
+						if mr.Status == CapabilityModelStatusQueued || mr.Status == CapabilityModelStatusRunning {
+							allDone = false
+						}
+						if mr.Status == CapabilityModelStatusSuccess {
+							anySuccess = true
+							successCount++
+							if firstSuccessModel == "" {
+								firstSuccessModel = mr.Model
+								firstSuccessStreaming = mr.StreamingSupported
+							}
+						}
+					}
+					j.Tests[i].SuccessCount = successCount
+					if anySuccess {
+						j.Tests[i].Success = true
+						j.Tests[i].TestedModel = firstSuccessModel
+						j.Tests[i].StreamingSupported = firstSuccessStreaming
+						j.Tests[i].Error = nil
+					}
+					if allDone {
+						if anySuccess {
+							j.Tests[i].Status = CapabilityProtocolStatusCompleted
+						} else {
+							j.Tests[i].Status = CapabilityProtocolStatusFailed
+						}
+					}
+					j.Tests[i].TestedAt = time.Now().Format(time.RFC3339Nano)
+					break
+				}
+			})
+
+			log.Printf("[CapabilityTest-Retry] 单模型重测完成: job=%s, protocol=%s, model=%s, success=%v",
+				jobID, req.Protocol, req.Model, modelResult.Success)
+		}()
+
+		c.JSON(http.StatusOK, gin.H{"status": "accepted"})
+	}
 }
 
 // ============== 错误分类 ==============

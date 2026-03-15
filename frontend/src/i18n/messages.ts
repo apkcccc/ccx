@@ -74,6 +74,10 @@ export type MessageKey =
   | 'capability.modelSuccess'
   | 'capability.modelFailed'
   | 'capability.modelSkipped'
+  | 'capability.cancel'
+  | 'capability.cancelling'
+  | 'capability.cancelled'
+  | 'capability.retryModel'
   | 'orchestration.title'
   | 'orchestration.multiChannel'
   | 'orchestration.singleChannel'
@@ -396,6 +400,10 @@ export const messages: Record<SupportedLocale, Record<MessageKey, string>> = {
     'capability.modelSuccess': 'Available',
     'capability.modelFailed': 'Failed',
     'capability.modelSkipped': 'Skipped',
+    'capability.cancel': 'Cancel Test',
+    'capability.cancelling': 'Cancelling...',
+    'capability.cancelled': 'Cancelled',
+    'capability.retryModel': 'Retry this model',
     'orchestration.title': 'Channel orchestration',
     'orchestration.multiChannel': 'Multi-channel mode',
     'orchestration.singleChannel': 'Single-channel mode',
@@ -717,6 +725,10 @@ export const messages: Record<SupportedLocale, Record<MessageKey, string>> = {
     'capability.modelSuccess': 'Tersedia',
     'capability.modelFailed': 'Gagal',
     'capability.modelSkipped': 'Dilewati',
+    'capability.cancel': 'Batalkan Tes',
+    'capability.cancelling': 'Membatalkan...',
+    'capability.cancelled': 'Dibatalkan',
+    'capability.retryModel': 'Coba ulang model ini',
     'orchestration.title': 'Orkestrasi channel',
     'orchestration.multiChannel': 'Mode multi-channel',
     'orchestration.singleChannel': 'Mode single-channel',
@@ -1038,6 +1050,10 @@ export const messages: Record<SupportedLocale, Record<MessageKey, string>> = {
     'capability.modelSuccess': '可用',
     'capability.modelFailed': '失败',
     'capability.modelSkipped': '已跳过',
+    'capability.cancel': '取消测试',
+    'capability.cancelling': '取消中...',
+    'capability.cancelled': '已取消',
+    'capability.retryModel': '重测此模型',
     'orchestration.title': '渠道编排',
     'orchestration.multiChannel': '多渠道模式',
     'orchestration.singleChannel': '单渠道模式',

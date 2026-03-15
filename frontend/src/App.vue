@@ -379,6 +379,8 @@
       :current-tab="channelStore.activeTab"
       :capability-job="capabilityTestJob"
       @copy-to-tab="handleCopyToTab"
+      @cancel="handleCancelCapabilityTest"
+      @retry-model="handleRetryCapabilityModel"
     />
 
     <!-- 添加API密钥对话框 -->
@@ -691,6 +693,7 @@ const capabilityTestDialogRef = ref<InstanceType<typeof CapabilityTestDialog> | 
 const capabilityTestJobId = ref('')
 const capabilityTestPolling = ref<ReturnType<typeof setInterval> | null>(null)
 const capabilityTestJob = ref<CapabilityTestJob | null>(null)
+const capabilityTestPreviousJobId = ref('') // 记录上一次的 jobId，用于复用成功结果
 
 watch(showCapabilityTestDialog, (open) => {
   if (!open) {
@@ -714,7 +717,7 @@ const stopCapabilityTestPolling = () => {
 
 const updateCapabilityJob = (job: CapabilityTestJob) => {
   capabilityTestJob.value = job
-  if (job.status === 'completed' || job.status === 'failed') {
+  if (job.status === 'completed' || job.status === 'failed' || job.status === 'cancelled') {
     stopCapabilityTestPolling()
   }
 }
@@ -726,11 +729,15 @@ const testChannelCapability = async (channelId: number) => {
 
   showCapabilityTestDialog.value = true
   stopCapabilityTestPolling()
+  // 记录上一次的 jobId 用于复用成功结果
+  capabilityTestPreviousJobId.value = capabilityTestJobId.value
   capabilityTestJobId.value = ''
   capabilityTestJob.value = null
 
   try {
-    const startResp: CapabilityTestJobStartResponse = await api.startChannelCapabilityTest(channelStore.activeTab, channelId)
+    const startResp: CapabilityTestJobStartResponse = await api.startChannelCapabilityTest(
+      channelStore.activeTab, channelId, capabilityTestPreviousJobId.value || undefined
+    )
     capabilityTestJobId.value = startResp.jobId
 
     // 后端返回时已带完整 job（含各协议模型列表），直接展示
@@ -755,6 +762,42 @@ const testChannelCapability = async (channelId: number) => {
   } catch (error) {
     const message = error instanceof Error ? error.message : t('system.unknown')
     capabilityTestDialogRef.value?.setError(t('toast.capabilityFailed', { message }))
+  }
+}
+
+// 取消能力测试
+const handleCancelCapabilityTest = async () => {
+  if (!capabilityTestJobId.value) return
+  try {
+    await api.cancelCapabilityTest(channelStore.activeTab, capabilityTestChannelId.value, capabilityTestJobId.value)
+    stopCapabilityTestPolling()
+    // 获取最新状态以更新 UI
+    const latest = await api.getChannelCapabilityTestStatus(channelStore.activeTab, capabilityTestChannelId.value, capabilityTestJobId.value)
+    updateCapabilityJob(latest)
+  } catch (error) {
+    console.error('Failed to cancel capability test:', error)
+  }
+}
+
+// 重测单个模型
+const handleRetryCapabilityModel = async (protocol: string, model: string) => {
+  if (!capabilityTestJobId.value) return
+  try {
+    await api.retryCapabilityTestModel(channelStore.activeTab, capabilityTestChannelId.value, capabilityTestJobId.value, protocol, model)
+    // 启动轮询（如果未在运行中）
+    if (!capabilityTestPolling.value) {
+      capabilityTestPolling.value = setInterval(async () => {
+        if (!capabilityTestJobId.value) return
+        try {
+          const latest = await api.getChannelCapabilityTestStatus(channelStore.activeTab, capabilityTestChannelId.value, capabilityTestJobId.value)
+          updateCapabilityJob(latest)
+        } catch (error) {
+          console.error('Failed to poll capability test job:', error)
+        }
+      }, 1000)
+    }
+  } catch (error) {
+    console.error('Failed to retry capability test model:', error)
   }
 }
 

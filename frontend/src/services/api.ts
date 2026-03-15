@@ -151,7 +151,7 @@ export interface CapabilityTestJobStartResponse {
   job?: CapabilityTestJob
 }
 
-export type CapabilityTestJobStatus = 'queued' | 'running' | 'completed' | 'failed'
+export type CapabilityTestJobStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled'
 export type CapabilityProtocolJobStatus = 'queued' | 'running' | 'completed' | 'failed'
 export type CapabilityModelJobStatus = 'queued' | 'running' | 'success' | 'failed' | 'skipped'
 
@@ -615,18 +615,35 @@ export class ApiService {
 
   // ============== 能力测试 API ==============
 
-  async startChannelCapabilityTest(type: 'messages' | 'chat' | 'gemini' | 'responses', id: number): Promise<CapabilityTestJobStartResponse> {
+  async startChannelCapabilityTest(type: 'messages' | 'chat' | 'gemini' | 'responses', id: number, previousJobId?: string): Promise<CapabilityTestJobStartResponse> {
+    const body: { targetProtocols: string[]; timeout: number; previousJobId?: string } = {
+      targetProtocols: ['messages', 'chat', 'gemini', 'responses'],
+      timeout: 10000
+    }
+    if (previousJobId) {
+      body.previousJobId = previousJobId
+    }
     return this.request(`/${type}/channels/${id}/capability-test`, {
       method: 'POST',
-      body: JSON.stringify({
-        targetProtocols: ['messages', 'chat', 'gemini', 'responses'],
-        timeout: 10000
-      })
+      body: JSON.stringify(body)
     })
   }
 
   async getChannelCapabilityTestStatus(type: 'messages' | 'chat' | 'gemini' | 'responses', id: number, jobId: string): Promise<CapabilityTestJob> {
     return this.request(`/${type}/channels/${id}/capability-test/${jobId}`)
+  }
+
+  async cancelCapabilityTest(type: 'messages' | 'chat' | 'gemini' | 'responses', id: number, jobId: string): Promise<void> {
+    await this.request(`/${type}/channels/${id}/capability-test/${jobId}`, {
+      method: 'DELETE'
+    })
+  }
+
+  async retryCapabilityTestModel(type: 'messages' | 'chat' | 'gemini' | 'responses', id: number, jobId: string, protocol: string, model: string): Promise<void> {
+    await this.request(`/${type}/channels/${id}/capability-test/${jobId}/retry`, {
+      method: 'POST',
+      body: JSON.stringify({ protocol, model })
+    })
   }
 
   async testChannelCapability(type: 'messages' | 'chat' | 'gemini' | 'responses', id: number): Promise<CapabilityTestResult> {

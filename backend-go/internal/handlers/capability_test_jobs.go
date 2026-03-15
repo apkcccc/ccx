@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
@@ -26,6 +27,7 @@ const (
 	CapabilityJobStatusRunning   CapabilityJobStatus = "running"
 	CapabilityJobStatusCompleted CapabilityJobStatus = "completed"
 	CapabilityJobStatusFailed    CapabilityJobStatus = "failed"
+	CapabilityJobStatusCancelled CapabilityJobStatus = "cancelled"
 )
 
 const (
@@ -96,6 +98,7 @@ type CapabilityTestJob struct {
 	CacheHit            bool                          `json:"cacheHit,omitempty"`
 	TargetProtocols     []string                      `json:"targetProtocols,omitempty"`
 	TimeoutMilliseconds int                           `json:"timeoutMilliseconds,omitempty"`
+	CancelFunc          context.CancelFunc            `json:"-"` // 用于取消正在执行的测试 goroutine
 }
 
 type capabilityTestJobStore struct {
@@ -129,7 +132,7 @@ func (s *capabilityTestJobStore) gc() {
 	s.Lock()
 	defer s.Unlock()
 	for jobID, job := range s.jobs {
-		if job.Status != CapabilityJobStatusCompleted && job.Status != CapabilityJobStatusFailed {
+		if job.Status != CapabilityJobStatusCompleted && job.Status != CapabilityJobStatusFailed && job.Status != CapabilityJobStatusCancelled {
 			continue
 		}
 		t, err := time.Parse(time.RFC3339Nano, job.UpdatedAt)
@@ -267,6 +270,26 @@ func (s *capabilityTestJobStore) update(jobID string, updater func(job *Capabili
 	return cloneCapabilityTestJob(job), true
 }
 
+// setCancelFunc 直接设置内部 job 的 CancelFunc（不走 clone，因为 CancelFunc 不可复制）
+func (s *capabilityTestJobStore) setCancelFunc(jobID string, cancel context.CancelFunc) {
+	s.Lock()
+	defer s.Unlock()
+	if job, ok := s.jobs[jobID]; ok {
+		job.CancelFunc = cancel
+	}
+}
+
+// getCancelFunc 获取 job 的 CancelFunc
+func (s *capabilityTestJobStore) getCancelFunc(jobID string) (context.CancelFunc, bool) {
+	s.RLock()
+	defer s.RUnlock()
+	job, ok := s.jobs[jobID]
+	if !ok || job.CancelFunc == nil {
+		return nil, false
+	}
+	return job.CancelFunc, true
+}
+
 func cloneCapabilityTestJob(job *CapabilityTestJob) *CapabilityTestJob {
 	if job == nil {
 		return nil
@@ -328,6 +351,11 @@ func recomputeCapabilityJob(job *CapabilityTestJob) {
 
 	if allProtocolsFinished && job.FinishedAt == "" {
 		job.FinishedAt = job.UpdatedAt
+	}
+
+	// cancelled 状态由取消逻辑显式设置，recompute 不覆盖
+	if job.Status == CapabilityJobStatusCancelled {
+		return
 	}
 
 	if allProtocolsFinished {

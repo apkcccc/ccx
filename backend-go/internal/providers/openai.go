@@ -345,6 +345,7 @@ func (p *OpenAIProvider) ConvertToClaudeResponse(providerResp *types.ProviderRes
 		for _, toolCall := range msg.ToolCalls {
 			var input interface{}
 			json.Unmarshal([]byte(toolCall.Function.Arguments), &input)
+			input = sanitizeClaudeToolInput(toolCall.Function.Name, input)
 
 			claudeResp.Content = append(claudeResp.Content, types.ClaudeContent{
 				Type:  "tool_use",
@@ -535,6 +536,7 @@ func (p *OpenAIProvider) HandleStreamResponse(body io.ReadCloser) (<-chan string
 					if acc.ID != "" && acc.Name != "" && acc.Arguments != "" {
 						var args interface{}
 						if err := json.Unmarshal([]byte(acc.Arguments), &args); err == nil {
+							args = sanitizeClaudeToolInput(acc.Name, args)
 							events := processToolUsePart(acc.ID, acc.Name, args, toolUseBlockIndex)
 							for _, event := range events {
 								eventChan <- event

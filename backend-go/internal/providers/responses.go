@@ -370,6 +370,7 @@ func (p *ResponsesProvider) ConvertToClaudeResponse(providerResp *types.Provider
 				if args, ok := item["arguments"].(string); ok && args != "" {
 					_ = json.Unmarshal([]byte(args), &input)
 				}
+				input = sanitizeClaudeToolInput(toString(item["name"]), input)
 				claudeResp.Content = append(claudeResp.Content, types.ClaudeContent{
 					Type:  "tool_use",
 					ID:    toString(item["call_id"]),
@@ -443,6 +444,7 @@ func (p *ResponsesProvider) HandleStreamResponse(body io.ReadCloser) (<-chan str
 		textBlockIndex := 0
 		toolBlockIndex := 1
 		currentTool := map[string]string{}
+		var currentToolArgs strings.Builder
 		latestInputTokens := 0
 		latestOutputTokens := 0
 		stopReason := "end_turn"
@@ -514,6 +516,7 @@ func (p *ResponsesProvider) HandleStreamResponse(body io.ReadCloser) (<-chan str
 					"id":   toString(item["call_id"]),
 					"name": toString(item["name"]),
 				}
+				currentToolArgs.Reset()
 				if currentTool["id"] == "" {
 					currentTool["id"] = currentTool["name"]
 				}
@@ -529,17 +532,29 @@ func (p *ResponsesProvider) HandleStreamResponse(body io.ReadCloser) (<-chan str
 				if currentTool["id"] == "" {
 					continue
 				}
-				emitJSON("content_block_delta", map[string]interface{}{
-					"index": toolBlockIndex,
-					"delta": map[string]interface{}{"type": "input_json_delta", "partial_json": toString(data["delta"])},
-				})
+				// 先聚合完整 arguments，再一次性发给下游（便于做 JSON 级别清洗）。
+				currentToolArgs.WriteString(toString(data["delta"]))
 			case "response.output_item.done":
 				item, _ := data["item"].(map[string]interface{})
 				if toString(item["type"]) == "function_call" && currentTool["id"] != "" {
+					argsJSON := currentToolArgs.String()
+					if strings.TrimSpace(argsJSON) == "" {
+						argsJSON = toString(item["arguments"])
+					}
+					if strings.TrimSpace(argsJSON) == "" {
+						argsJSON = "{}"
+					}
+					argsJSON = sanitizeClaudeToolArgsJSON(currentTool["name"], argsJSON)
+
+					emitJSON("content_block_delta", map[string]interface{}{
+						"index": toolBlockIndex,
+						"delta": map[string]interface{}{"type": "input_json_delta", "partial_json": argsJSON},
+					})
 					emitJSON("content_block_stop", map[string]interface{}{"index": toolBlockIndex})
 					toolBlockIndex++
 					stopReason = "tool_use"
 					currentTool = map[string]string{}
+					currentToolArgs.Reset()
 				}
 			case "response.completed":
 				response, _ := data["response"].(map[string]interface{})

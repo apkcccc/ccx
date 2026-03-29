@@ -1,5 +1,5 @@
 #!/bin/sh
-# 自动同步配置到 GitHub
+# 自动同步配置到 GitHub（仅在有变化时）
 
 set -e
 
@@ -17,12 +17,23 @@ if [ ! -f "$CONFIG_FILE" ]; then
   exit 0
 fi
 
-echo "开始同步配置到 GitHub..."
+# 获取当前文件的 SHA 和内容
+REMOTE_DATA=$(curl -s -H "Authorization: token $GITHUB_TOKEN" \
+  "https://api.github.com/repos/$GITHUB_REPO/contents/$CONFIG_FILE")
 
-# 获取当前文件的 SHA
-CURRENT_SHA=$(curl -s -H "Authorization: token $GITHUB_TOKEN" \
-  "https://api.github.com/repos/$GITHUB_REPO/contents/$CONFIG_FILE" | \
-  grep '"sha"' | head -1 | sed 's/.*"sha": "\(.*\)".*/\1/')
+CURRENT_SHA=$(echo "$REMOTE_DATA" | grep '"sha"' | head -1 | sed 's/.*"sha": "\(.*\)".*/\1/')
+REMOTE_CONTENT=$(echo "$REMOTE_DATA" | grep -o '"content": *"[^"]*"' | sed 's/"content": *"//' | sed 's/"$//' | tr -d '\n' | base64 -d)
+
+# 读取本地文件内容
+LOCAL_CONTENT=$(cat "$CONFIG_FILE")
+
+# 比较内容，只在有变化时同步
+if [ "$LOCAL_CONTENT" = "$REMOTE_CONTENT" ]; then
+  echo "配置无变化，跳过同步"
+  exit 0
+fi
+
+echo "检测到配置变化，开始同步到 GitHub..."
 
 # Base64 编码配置文件
 CONTENT=$(base64 -w 0 "$CONFIG_FILE" 2>/dev/null || base64 "$CONFIG_FILE")

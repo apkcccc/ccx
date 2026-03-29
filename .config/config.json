@@ -24,7 +24,7 @@
         "claude-sonnet-4-6": "claude-4.6-sonnet"
       },
       "priority": 1,
-      "status": "suspended",
+      "status": "active",
       "rpm": 10
     }
   ],

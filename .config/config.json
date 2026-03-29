@@ -251,7 +251,7 @@
         "sk-jQ7FFBGD6ypaCptenXh7lu2Vbb6DcKHXfKOj8MJ5ExPeO3hY"
       ],
       "serviceType": "openai",
-      "name": "autocode",
+      "name": "a",
       "website": "https://api.autocode.space/console/personal",
       "priority": 9,
       "status": "active",

@@ -45,8 +45,9 @@ RUN apk --no-cache add ca-certificates tzdata curl
 # 从构建阶段复制 Go 二进制文件（已内嵌前端资源）
 COPY --from=builder /src/dist/ccx-go /app/ccx
 
-# 复制配置文件和脚本
+# 复制配置文件、环境变量和脚本
 COPY .config/ /app/.config/
+COPY .env /app/.env
 COPY scripts/ /app/scripts/
 
 # 设置脚本执行权限

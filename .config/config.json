@@ -230,7 +230,7 @@
       "name": "yybbwan",
       "website": "https://yybbwan.xyz/console/personal",
       "priority": 4,
-      "status": "disabled",
+      "status": "active",
       "rpm": 10
     },
     {
@@ -242,7 +242,7 @@
       "name": "cnmz",
       "website": "https://1.cnmz.de/console/personal",
       "priority": 3,
-      "status": "disabled",
+      "status": "active",
       "rpm": 10
     },
     {
@@ -251,7 +251,7 @@
         "sk-jQ7FFBGD6ypaCptenXh7lu2Vbb6DcKHXfKOj8MJ5ExPeO3hY"
       ],
       "serviceType": "openai",
-      "name": "a",
+      "name": "autocode",
       "website": "https://api.autocode.space/console/personal",
       "priority": 9,
       "status": "active",

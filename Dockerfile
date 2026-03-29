@@ -39,11 +39,19 @@ FROM alpine:latest AS runtime
 
 WORKDIR /app
 
-# 安装运行时依赖
-RUN apk --no-cache add ca-certificates tzdata
+# 安装运行时依赖（添加 curl 用于同步脚本）
+RUN apk --no-cache add ca-certificates tzdata curl
 
 # 从构建阶段复制 Go 二进制文件（已内嵌前端资源）
 COPY --from=builder /src/dist/ccx-go /app/ccx
+
+# 复制配置文件和脚本
+COPY .config/ /app/.config/
+COPY .env /app/.env
+COPY scripts/ /app/scripts/
+
+# 设置脚本执行权限
+RUN chmod +x /app/scripts/*.sh
 
 # 创建配置目录和日志目录
 RUN mkdir -p /app/.config/backups /app/logs
@@ -55,8 +63,7 @@ ENV TZ=Asia/Shanghai
 EXPOSE 3000
 
 # 健康检查
-HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-    CMD wget --no-verbose --tries=1 --spider http://localhost:3000/health || exit 1
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \CMD wget --no-verbose --tries=1 --spider http://localhost:3000/health || exit 1
 
-# 启动命令
-CMD ["/app/ccx"]
+# 使用启动脚本（带自动同步）
+CMD ["/app/scripts/entrypoint.sh"]

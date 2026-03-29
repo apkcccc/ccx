@@ -83,7 +83,7 @@
         "sk-9fc90eda58bca84b855aa8fb4b3e94539fe19015f33ea4e4d297d1d9c301bbb0"
       ],
       "serviceType": "responses",
-      "name": "saku无签到",
+      "name": "sakura",
       "website": "https://codex.sakurapy.de/dashboard",
       "priority": 6,
       "status": "active",

@@ -47,7 +47,6 @@ COPY --from=builder /src/dist/ccx-go /app/ccx
 
 # 复制配置文件和脚本
 COPY .config/ /app/.config/
-COPY .env /app/.env
 COPY scripts/ /app/scripts/
 
 # 设置脚本执行权限

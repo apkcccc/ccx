@@ -12,20 +12,18 @@ if [ -z "$GITHUB_TOKEN" ]; then
   exit 1
 fi
 
-echo "从 GitHub 恢复配置..."
+echo "正在从 GitHub 下载配置..."
 
-# 下载配置文件（使用 jq 处理 JSON）
-curl -s -H "Authorization: token $GITHUB_TOKEN" \
-  "https://api.github.com/repos/$GITHUB_REPO/contents/$CONFIG_FILE" | \
-  grep -o '"content": *"[^"]*"' | \
-  sed 's/"content": *"//' | \
-  sed 's/"$//' | \
-  tr -d '\n' | \
-  base64 -d > "$CONFIG_FILE"
+# 下载配置文件
+REMOTE_DATA=$(curl -s -H "Authorization: token $GITHUB_TOKEN" \
+  "https://api.github.com/repos/$GITHUB_REPO/contents/$CONFIG_FILE")
 
-if [ -f "$CONFIG_FILE" ] && [ -s "$CONFIG_FILE" ]; then
+# 检查是否成功获取
+if echo "$REMOTE_DATA" | grep -q '"content"'; then
+  # 解码并保存
+  echo "$REMOTE_DATA" | grep -o '"content": *"[^"]*"' | sed 's/"content": *"//' | sed 's/"$//' | tr -d '\n' | base64 -d > "$CONFIG_FILE"
   echo "配置恢复成功！"
 else
-  echo "配置恢复失败，使用默认配置"
-  exit 1
+  echo "GitHub 上没有配置文件，使用默认配置"
+  exit 0
 fi

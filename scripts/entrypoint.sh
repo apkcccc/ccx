@@ -11,10 +11,10 @@ echo "使用镜像中的配置文件"
 
 # 启动定时同步任务（后台运行）
 if [ -n "$GITHUB_TOKEN" ]; then
-  echo "启动定时同步任务（每分钟）..."
+  echo "启动定时同步任务（每小时）..."
   (
     while true; do
-      sleep 60  # 每分钟同步一次（测试用）
+      sleep 3600  # 每小时同步一次
       /app/scripts/sync-to-github.sh || echo "同步失败"
     done
   ) &

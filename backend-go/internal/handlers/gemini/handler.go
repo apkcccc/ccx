@@ -1,4 +1,3 @@
-// Package gemini 提供 Gemini API 的处理器
 package gemini
 
 import (
@@ -29,7 +28,6 @@ func Handler(
 	channelScheduler *scheduler.ChannelScheduler,
 ) gin.HandlerFunc {
 	return gin.HandlerFunc(func(c *gin.Context) {
-		// Gemini 代理端点统一使用代理访问密钥鉴权（x-api-key / Authorization: Bearer）
 		middleware.ProxyAuthMiddleware(envCfg)(c)
 		if c.IsAborted() {
 			return
@@ -37,33 +35,25 @@ func Handler(
 
 		startTime := time.Now()
 
-		// 读取原始请求体
 		maxBodySize := envCfg.MaxRequestBodySize
 		bodyBytes, err := common.ReadRequestBody(c, maxBodySize)
 		if err != nil {
 			return
 		}
 
-		// 解析 Gemini 请求
-		var geminiReq types.GeminiRequest
-		if len(bodyBytes) > 0 {
-			if err := json.Unmarshal(bodyBytes, &geminiReq); err != nil {
-				c.JSON(400, types.GeminiError{
-					Error: types.GeminiErrorDetail{
-						Code:    400,
-						Message: fmt.Sprintf("Invalid request body: %v", err),
-						Status:  "INVALID_ARGUMENT",
-					},
-				})
-				return
-			}
+		geminiReq, err := parseGeminiCompatibleRequest(bodyBytes)
+		if err != nil {
+			c.JSON(400, types.GeminiError{
+				Error: types.GeminiErrorDetail{
+					Code:    400,
+					Message: fmt.Sprintf("Invalid request body: %v", err),
+					Status:  "INVALID_ARGUMENT",
+				},
+			})
+			return
 		}
 
-		// 从 URL 路径提取模型名称
-		// 格式: /v1/models/{model}:generateContent 或 /v1/models/{model}:streamGenerateContent
-		// 使用 *modelAction 通配符捕获整个后缀，如 /gemini-pro:generateContent
 		modelAction := c.Param("modelAction")
-		// 移除前导斜杠（Gin 的 * 通配符会保留前导斜杠）
 		modelAction = strings.TrimPrefix(modelAction, "/")
 		model := extractModelName(modelAction)
 		if model == "" {
@@ -77,41 +67,376 @@ func Handler(
 			return
 		}
 
-		// 判断是否流式
 		isStream := strings.Contains(c.Request.URL.Path, "streamGenerateContent")
-
-		// 提取对话标识用于 Trace 亲和性
 		userID := common.ExtractConversationID(c, bodyBytes)
-
-		// 记录原始请求信息
 		common.LogOriginalRequest(c, bodyBytes, envCfg, "Gemini")
 
-		// 检查是否为多渠道模式
 		isMultiChannel := channelScheduler.IsMultiChannelMode(scheduler.ChannelKindGemini)
 
 		if isMultiChannel {
-			handleMultiChannel(c, envCfg, cfgManager, channelScheduler, bodyBytes, &geminiReq, model, isStream, userID, startTime)
+			handleMultiChannel(c, envCfg, cfgManager, channelScheduler, bodyBytes, geminiReq, model, isStream, userID, startTime)
 		} else {
-			handleSingleChannel(c, envCfg, cfgManager, channelScheduler, bodyBytes, &geminiReq, model, isStream, startTime)
+			handleSingleChannel(c, envCfg, cfgManager, channelScheduler, bodyBytes, geminiReq, model, isStream, startTime)
 		}
 	})
 }
 
-// extractModelName 从 URL 参数提取模型名称
-// 输入: "gemini-2.0-flash:generateContent" 或 "gemini-2.0-flash"
-// 输出: "gemini-2.0-flash"
 func extractModelName(param string) string {
 	if param == "" {
 		return ""
 	}
-	// 移除 :generateContent 或 :streamGenerateContent 后缀
 	if idx := strings.Index(param, ":"); idx > 0 {
 		return param[:idx]
 	}
 	return param
 }
 
-// handleMultiChannel 处理多渠道 Gemini 请求
+func parseGeminiCompatibleRequest(bodyBytes []byte) (*types.GeminiRequest, error) {
+	req := &types.GeminiRequest{}
+	if len(bodyBytes) == 0 {
+		return req, nil
+	}
+
+	if err := json.Unmarshal(bodyBytes, req); err == nil {
+		if len(req.Contents) > 0 || req.SystemInstruction != nil || len(req.Tools) > 0 || req.GenerationConfig != nil {
+			return req, nil
+		}
+	}
+
+	var reqMap map[string]interface{}
+	if err := json.Unmarshal(bodyBytes, &reqMap); err != nil {
+		return nil, err
+	}
+
+	if contents, ok := reqMap["contents"]; ok && contents != nil {
+		normalized, err := json.Marshal(reqMap)
+		if err != nil {
+			return nil, err
+		}
+		req = &types.GeminiRequest{}
+		if err := json.Unmarshal(normalized, req); err != nil {
+			return nil, err
+		}
+		return req, nil
+	}
+
+	return convertOpenAIStyleToGeminiRequest(reqMap)
+}
+
+func convertOpenAIStyleToGeminiRequest(reqMap map[string]interface{}) (*types.GeminiRequest, error) {
+	req := &types.GeminiRequest{}
+
+	if systemInstruction := buildSystemInstruction(reqMap); systemInstruction != nil {
+		req.SystemInstruction = systemInstruction
+	}
+
+	if messages, ok := reqMap["messages"].([]interface{}); ok && len(messages) > 0 {
+		req.Contents = convertMessagesToGeminiContents(messages)
+	} else if input, ok := reqMap["input"]; ok {
+		req.Contents = buildSingleUserContent(input)
+	} else if prompt, ok := reqMap["prompt"]; ok {
+		req.Contents = buildSingleUserContent(prompt)
+	}
+
+	if tools, ok := reqMap["tools"].([]interface{}); ok && len(tools) > 0 {
+		req.Tools = convertOpenAIToolsToGeminiTools(tools)
+	}
+
+	req.GenerationConfig = buildGenerationConfig(reqMap)
+
+	return req, nil
+}
+
+func buildSystemInstruction(reqMap map[string]interface{}) *types.GeminiContent {
+	if system, ok := reqMap["system"]; ok {
+		parts := toGeminiPartsFromContent(system)
+		if len(parts) > 0 {
+			return &types.GeminiContent{Parts: parts, Role: "user"}
+		}
+	}
+
+	if instructions, ok := reqMap["instructions"]; ok {
+		parts := toGeminiPartsFromContent(instructions)
+		if len(parts) > 0 {
+			return &types.GeminiContent{Parts: parts, Role: "user"}
+		}
+	}
+
+	if messages, ok := reqMap["messages"].([]interface{}); ok && len(messages) > 0 {
+		var systemParts []types.GeminiPart
+		for _, raw := range messages {
+			msg, ok := raw.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			role, _ := msg["role"].(string)
+			if role != "system" {
+				continue
+			}
+			systemParts = append(systemParts, toGeminiPartsFromContent(msg["content"])...)
+		}
+		if len(systemParts) > 0 {
+			return &types.GeminiContent{Parts: systemParts, Role: "user"}
+		}
+	}
+
+	return nil
+}
+
+func buildSingleUserContent(v interface{}) []types.GeminiContent {
+	parts := toGeminiPartsFromContent(v)
+	if len(parts) == 0 {
+		return nil
+	}
+	return []types.GeminiContent{{Role: "user", Parts: parts}}
+}
+
+func convertMessagesToGeminiContents(messages []interface{}) []types.GeminiContent {
+	var contents []types.GeminiContent
+
+	for _, raw := range messages {
+		msg, ok := raw.(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		role, _ := msg["role"].(string)
+		if role == "system" {
+			continue
+		}
+
+		geminiRole := "user"
+		if role == "assistant" {
+			geminiRole = "model"
+		}
+
+		parts := toGeminiPartsFromContent(msg["content"])
+
+		if role == "assistant" {
+			if toolCalls, ok := msg["tool_calls"].([]interface{}); ok && len(toolCalls) > 0 {
+				parts = append(parts, convertToolCallsToGeminiParts(toolCalls)...)
+			}
+		}
+
+		if role == "tool" {
+			parts = buildToolResponseParts(msg)
+			geminiRole = "user"
+		}
+
+		if len(parts) == 0 {
+			continue
+		}
+
+		contents = append(contents, types.GeminiContent{
+			Role:  geminiRole,
+			Parts: parts,
+		})
+	}
+
+	return contents
+}
+
+func toGeminiPartsFromContent(content interface{}) []types.GeminiPart {
+	switch v := content.(type) {
+	case string:
+		if strings.TrimSpace(v) == "" {
+			return nil
+		}
+		return []types.GeminiPart{{Text: v}}
+	case []interface{}:
+		var parts []types.GeminiPart
+		for _, item := range v {
+			itemMap, ok := item.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			itemType, _ := itemMap["type"].(string)
+			switch itemType {
+			case "", "text", "input_text", "output_text":
+				if text, ok := itemMap["text"].(string); ok && strings.TrimSpace(text) != "" {
+					parts = append(parts, types.GeminiPart{Text: text})
+				}
+			case "image_url":
+				if imageURL, ok := itemMap["image_url"].(map[string]interface{}); ok {
+					if url, ok := imageURL["url"].(string); ok && strings.TrimSpace(url) != "" {
+						parts = append(parts, types.GeminiPart{
+							FileData: &types.GeminiFileData{FileURI: url},
+						})
+					}
+				}
+			}
+		}
+		return parts
+	default:
+		if s, ok := v.(fmt.Stringer); ok {
+			text := s.String()
+			if strings.TrimSpace(text) != "" {
+				return []types.GeminiPart{{Text: text}}
+			}
+		}
+	}
+	return nil
+}
+
+func convertToolCallsToGeminiParts(toolCalls []interface{}) []types.GeminiPart {
+	var parts []types.GeminiPart
+	for _, raw := range toolCalls {
+		tc, ok := raw.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		fn, ok := tc["function"].(map[string]interface{})
+		if !ok {
+			continue
+		}
+		name, _ := fn["name"].(string)
+		argsStr, _ := fn["arguments"].(string)
+		args := map[string]interface{}{}
+		if strings.TrimSpace(argsStr) != "" {
+			_ = json.Unmarshal([]byte(argsStr), &args)
+		}
+		if name == "" {
+			continue
+		}
+		parts = append(parts, types.GeminiPart{
+			FunctionCall: &types.GeminiFunctionCall{
+				Name: name,
+				Args: args,
+			},
+		})
+	}
+	return parts
+}
+
+func buildToolResponseParts(msg map[string]interface{}) []types.GeminiPart {
+	name, _ := msg["name"].(string)
+	toolCallID, _ := msg["tool_call_id"].(string)
+	content := msg["content"]
+
+	response := map[string]interface{}{}
+	switch v := content.(type) {
+	case string:
+		var parsed interface{}
+		if strings.TrimSpace(v) != "" && json.Unmarshal([]byte(v), &parsed) == nil {
+			response["content"] = parsed
+		} else {
+			response["content"] = v
+		}
+	default:
+		response["content"] = v
+	}
+	if toolCallID != "" {
+		response["tool_call_id"] = toolCallID
+	}
+
+	if name == "" {
+		name = "tool_result"
+	}
+
+	return []types.GeminiPart{
+		{
+			FunctionResponse: &types.GeminiFunctionResponse{
+				Name:     name,
+				Response: response,
+			},
+		},
+	}
+}
+
+func convertOpenAIToolsToGeminiTools(tools []interface{}) []types.GeminiTool {
+	var declarations []types.GeminiFunctionDeclaration
+
+	for _, raw := range tools {
+		tool, ok := raw.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		fn, ok := tool["function"].(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		name, _ := fn["name"].(string)
+		if name == "" {
+			continue
+		}
+
+		desc, _ := fn["description"].(string)
+		declarations = append(declarations, types.GeminiFunctionDeclaration{
+			Name:        name,
+			Description: desc,
+			Parameters:  fn["parameters"],
+		})
+	}
+
+	if len(declarations) == 0 {
+		return nil
+	}
+
+	return []types.GeminiTool{{FunctionDeclarations: declarations}}
+}
+
+func buildGenerationConfig(reqMap map[string]interface{}) *types.GeminiGenerationConfig {
+	cfg := &types.GeminiGenerationConfig{}
+	hasValue := false
+
+	if v, ok := reqMap["temperature"].(float64); ok {
+		cfg.Temperature = &v
+		hasValue = true
+	}
+	if v, ok := reqMap["top_p"].(float64); ok {
+		cfg.TopP = &v
+		hasValue = true
+	}
+	if v, ok := reqMap["topP"].(float64); ok {
+		cfg.TopP = &v
+		hasValue = true
+	}
+	if v, ok := reqMap["top_k"].(float64); ok {
+		intV := int(v)
+		cfg.TopK = &intV
+		hasValue = true
+	}
+	if v, ok := reqMap["topK"].(float64); ok {
+		intV := int(v)
+		cfg.TopK = &intV
+		hasValue = true
+	}
+	if v, ok := reqMap["max_output_tokens"].(float64); ok {
+		cfg.MaxOutputTokens = int(v)
+		hasValue = true
+	}
+	if v, ok := reqMap["max_tokens"].(float64); ok {
+		cfg.MaxOutputTokens = int(v)
+		hasValue = true
+	}
+	if v, ok := reqMap["max_completion_tokens"].(float64); ok {
+		cfg.MaxOutputTokens = int(v)
+		hasValue = true
+	}
+
+	if stop, ok := reqMap["stop"].([]interface{}); ok && len(stop) > 0 {
+		var stops []string
+		for _, item := range stop {
+			if s, ok := item.(string); ok && s != "" {
+				stops = append(stops, s)
+			}
+		}
+		if len(stops) > 0 {
+			cfg.StopSequences = stops
+			hasValue = true
+		}
+	} else if stopStr, ok := reqMap["stop"].(string); ok && stopStr != "" {
+		cfg.StopSequences = []string{stopStr}
+		hasValue = true
+	}
+
+	if !hasValue {
+		return nil
+	}
+	return cfg
+}
+
 func handleMultiChannel(
 	c *gin.Context,
 	envCfg *config.EnvConfig,
@@ -196,7 +521,6 @@ func handleMultiChannel(
 	)
 }
 
-// handleSingleChannel 处理单渠道 Gemini 请求
 func handleSingleChannel(
 	c *gin.Context,
 	envCfg *config.EnvConfig,
@@ -273,17 +597,6 @@ func handleSingleChannel(
 	handleAllKeysFailed(c, lastFailoverError, lastError)
 }
 
-// ensureThoughtSignatures 确保所有 functionCall 都有 thought_signature 字段
-// 用于兼容 x666.me 等要求必须有该字段的第三方 API
-// 参考: https://ai.google.dev/gemini-api/docs/thought-signatures
-//
-// 行为：
-//   - 如果 functionCall 已有 thought_signature（非空），保留原始值
-//   - 如果 functionCall 没有 thought_signature（空字符串），填充 DummyThoughtSignature
-//
-// 使用场景：
-//   - x666.me 等第三方 API 会验证 thought_signature 字段必须存在
-//   - Gemini CLI 等客户端可能不会为所有 functionCall 提供 thought_signature
 func ensureThoughtSignatures(geminiReq *types.GeminiRequest) {
 	for i := range geminiReq.Contents {
 		for j := range geminiReq.Contents[i].Parts {
@@ -295,21 +608,17 @@ func ensureThoughtSignatures(geminiReq *types.GeminiRequest) {
 	}
 }
 
-// stripThoughtSignature 移除所有 functionCall 的 thought_signature 字段
-// 用于兼容旧版 Gemini API（不支持该字段）
 func stripThoughtSignature(geminiReq *types.GeminiRequest) {
 	for i := range geminiReq.Contents {
 		for j := range geminiReq.Contents[i].Parts {
 			part := &geminiReq.Contents[i].Parts[j]
 			if part.FunctionCall != nil {
-				// 使用特殊标记表示需要完全移除字段
 				part.FunctionCall.ThoughtSignature = types.StripThoughtSignatureMarker
 			}
 		}
 	}
 }
 
-// cloneGeminiRequest 深拷贝 GeminiRequest（通过 JSON 序列化/反序列化）
 func cloneGeminiRequest(req *types.GeminiRequest) *types.GeminiRequest {
 	clone := &types.GeminiRequest{}
 	data, _ := json.Marshal(req)
@@ -317,7 +626,6 @@ func cloneGeminiRequest(req *types.GeminiRequest) *types.GeminiRequest {
 	return clone
 }
 
-// buildProviderRequest 构建上游请求
 func buildProviderRequest(
 	c *gin.Context,
 	upstream *config.UpstreamConfig,
@@ -327,7 +635,6 @@ func buildProviderRequest(
 	model string,
 	isStream bool,
 ) (*http.Request, error) {
-	// 应用模型映射
 	mappedModel := config.RedirectModel(model, upstream)
 
 	var requestBody []byte
@@ -336,21 +643,17 @@ func buildProviderRequest(
 
 	switch upstream.ServiceType {
 	case "gemini":
-		// Gemini 上游：根据配置处理 thought_signature 字段
 		reqToUse := geminiReq
 
-		// 优先处理 StripThoughtSignature（移除字段）
 		if upstream.StripThoughtSignature {
 			reqCopy := cloneGeminiRequest(geminiReq)
 			stripThoughtSignature(reqCopy)
 			reqToUse = reqCopy
 		} else if upstream.InjectDummyThoughtSignature {
-			// 给空签名注入 dummy 值（兼容 x666.me 等要求必须有该字段的 API）
 			reqCopy := cloneGeminiRequest(geminiReq)
 			ensureThoughtSignatures(reqCopy)
 			reqToUse = reqCopy
 		}
-		// else: 默认直接透传，不做任何修改
 
 		requestBody, err = json.Marshal(reqToUse)
 		if err != nil {
@@ -367,7 +670,6 @@ func buildProviderRequest(
 		}
 
 	case "claude":
-		// Claude 上游：需要转换
 		claudeReq, err := converters.GeminiToClaudeRequest(geminiReq, mappedModel)
 		if err != nil {
 			return nil, err
@@ -380,7 +682,6 @@ func buildProviderRequest(
 		url = fmt.Sprintf("%s/v1/messages", strings.TrimRight(baseURL, "/"))
 
 	case "openai":
-		// OpenAI 上游：需要转换
 		openaiReq, err := converters.GeminiToOpenAIRequest(geminiReq, mappedModel)
 		if err != nil {
 			return nil, err
@@ -393,7 +694,6 @@ func buildProviderRequest(
 		url = fmt.Sprintf("%s/v1/chat/completions", strings.TrimRight(baseURL, "/"))
 
 	case "responses":
-		// Responses 上游：需要转换
 		responsesReq, err := converters.GeminiToResponsesRequest(geminiReq, mappedModel)
 		if err != nil {
 			return nil, err
@@ -406,21 +706,17 @@ func buildProviderRequest(
 		url = fmt.Sprintf("%s/v1/responses", strings.TrimRight(baseURL, "/"))
 
 	default:
-		// 默认当作 Gemini 处理，根据配置处理 thought_signature 字段
 		reqToUse := geminiReq
 
-		// 优先处理 StripThoughtSignature（移除字段）
 		if upstream.StripThoughtSignature {
 			reqCopy := cloneGeminiRequest(geminiReq)
 			stripThoughtSignature(reqCopy)
 			reqToUse = reqCopy
 		} else if upstream.InjectDummyThoughtSignature {
-			// 给空签名注入 dummy 值（兼容 x666.me 等要求必须有该字段的 API）
 			reqCopy := cloneGeminiRequest(geminiReq)
 			ensureThoughtSignatures(reqCopy)
 			reqToUse = reqCopy
 		}
-		// else: 默认直接透传，不做任何修改
 
 		requestBody, err = json.Marshal(reqToUse)
 		if err != nil {
@@ -441,14 +737,9 @@ func buildProviderRequest(
 		return nil, err
 	}
 
-	// 使用统一的头部处理逻辑（透明代理）
-	// 保留客户端的大部分 headers，只移除/替换必要的认证和代理相关 headers
 	req.Header = utils.PrepareUpstreamHeaders(c, req.URL.Host)
-
-	// 设置 Content-Type（覆盖可能来自客户端的值）
 	req.Header.Set("Content-Type", "application/json")
 
-	// 设置认证头
 	switch upstream.ServiceType {
 	case "gemini":
 		utils.SetGeminiAuthenticationHeader(req.Header, apiKey)
@@ -463,13 +754,11 @@ func buildProviderRequest(
 		utils.SetGeminiAuthenticationHeader(req.Header, apiKey)
 	}
 
-	// 应用自定义请求头
 	utils.ApplyCustomHeaders(req.Header, upstream.CustomHeaders)
 
 	return req, nil
 }
 
-// handleSuccess 处理成功的响应
 func handleSuccess(
 	c *gin.Context,
 	resp *http.Response,
@@ -486,7 +775,6 @@ func handleSuccess(
 		return handleStreamSuccess(c, resp, upstreamType, envCfg, startTime, model), nil
 	}
 
-	// 非流式响应处理
 	bodyBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
 		c.JSON(500, types.GeminiError{
@@ -504,12 +792,10 @@ func handleSuccess(
 		log.Printf("[Gemini-Timing] 响应完成: %dms, 状态: %d", responseTime, resp.StatusCode)
 	}
 
-	// 根据上游类型转换响应
 	var geminiResp *types.GeminiResponse
 
 	switch upstreamType {
 	case "gemini":
-		// 直接解析 Gemini 响应
 		if err := json.Unmarshal(bodyBytes, &geminiResp); err != nil {
 			preview := bodyBytes
 			if len(preview) > 100 {
@@ -520,7 +806,6 @@ func handleSuccess(
 		}
 
 	case "claude":
-		// 转换 Claude 响应为 Gemini 格式
 		var claudeResp map[string]interface{}
 		if err := json.Unmarshal(bodyBytes, &claudeResp); err != nil {
 			preview := bodyBytes
@@ -537,7 +822,6 @@ func handleSuccess(
 		}
 
 	case "openai":
-		// 转换 OpenAI 响应为 Gemini 格式
 		var openaiResp map[string]interface{}
 		if err := json.Unmarshal(bodyBytes, &openaiResp); err != nil {
 			preview := bodyBytes
@@ -554,7 +838,6 @@ func handleSuccess(
 		}
 
 	case "responses":
-		// 转换 Responses 响应为 Gemini 格式
 		var responsesResp map[string]interface{}
 		if err := json.Unmarshal(bodyBytes, &responsesResp); err != nil {
 			preview := bodyBytes
@@ -571,12 +854,10 @@ func handleSuccess(
 		}
 
 	default:
-		// 默认直接返回
 		c.Data(resp.StatusCode, "application/json", bodyBytes)
 		return nil, nil
 	}
 
-	// 返回 Gemini 格式响应
 	respBytes, err := json.Marshal(geminiResp)
 	if err != nil {
 		c.Data(resp.StatusCode, "application/json", bodyBytes)
@@ -585,7 +866,6 @@ func handleSuccess(
 
 	c.Data(resp.StatusCode, "application/json", respBytes)
 
-	// 提取 usage 统计
 	var usage *types.Usage
 	if geminiResp.UsageMetadata != nil {
 		usage = &types.Usage{
@@ -597,7 +877,6 @@ func handleSuccess(
 	return usage, nil
 }
 
-// handleAllChannelsFailed 处理所有渠道失败的情况
 func handleAllChannelsFailed(c *gin.Context, failoverErr *common.FailoverError, lastError error) {
 	if failoverErr != nil {
 		c.Data(failoverErr.Status, "application/json", failoverErr.Body)
@@ -618,7 +897,6 @@ func handleAllChannelsFailed(c *gin.Context, failoverErr *common.FailoverError, 
 	})
 }
 
-// handleAllKeysFailed 处理所有 Key 失败的情况
 func handleAllKeysFailed(c *gin.Context, failoverErr *common.FailoverError, lastError error) {
 	if failoverErr != nil {
 		c.Data(failoverErr.Status, "application/json", failoverErr.Body)

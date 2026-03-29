@@ -29,15 +29,13 @@ frontend/node_modules/.vite
 *.swo
 *~
 
-# 环境配置
-.env
+# 环境配置（允许 .env 文件）
 .env.local
 .env.*.local
 backend/.env
 backend-go/.env
 
-# 配置文件（运行时生成）
-.config
+# 配置文件（允许 .config 目录）
 backend-go/.config
 
 # 测试和覆盖率

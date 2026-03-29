@@ -1,19 +1,15 @@
 #!/bin/sh
-# CCX 启动脚本（带自动同步）
+# CCX 启动脚本（禁用自动恢复，保留手动同步）
 
 set -e
 
 echo "=== CCX 启动中 ==="
 
-# 1. 从 GitHub 恢复配置
-if [ -n "$GITHUB_TOKEN" ]; then
-  echo "从 GitHub 恢复配置..."
-  /app/scripts/restore-from-github.sh || echo "恢复失败，使用默认配置"
-else
-  echo "未设置 GITHUB_TOKEN，跳过配置恢复"
-fi
+# 禁用自动恢复功能（避免编码问题）
+# 配置文件已在 Docker 镜像中，不需要从 GitHub 恢复
+echo "使用镜像中的配置文件"
 
-# 2. 启动定时同步任务（后台运行）
+# 启动定时同步任务（后台运行）
 if [ -n "$GITHUB_TOKEN" ]; then
   echo "启动定时同步任务（每小时）..."
   (
@@ -22,8 +18,10 @@ if [ -n "$GITHUB_TOKEN" ]; then
       /app/scripts/sync-to-github.sh || echo "同步失败"
     done
   ) &
+else
+  echo "未设置 GITHUB_TOKEN，跳过自动同步"
 fi
 
-# 3. 启动 CCX 服务
+# 启动 CCX 服务
 echo "启动 CCX 服务..."
 exec /app/ccx

@@ -63,7 +63,7 @@ ENV TZ=Asia/Shanghai
 EXPOSE 3000
 
 # 健康检查
-HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \CMD wget --no-verbose --tries=1 --spider http://localhost:3000/health || exit 1
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 CMD wget --no-verbose --tries=1 --spider http://localhost:3000/health || exit 1
 
 # 使用启动脚本（带自动同步）
 CMD ["/app/scripts/entrypoint.sh"]
